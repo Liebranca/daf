@@ -26,7 +26,10 @@ package daf;
 
   use Style;
   use Chk;
+
   use Type;
+  use Type::cstr;
+
   use Bpack;
 
   use Arstd::Path;
@@ -40,7 +43,7 @@ package daf;
 # ---   *   ---   *   ---
 # info
 
-  our $VERSION = v0.00.5;#a
+  our $VERSION = v0.00.6;#a
   our $AUTHOR  = 'IBN-3DILA';
 
 # ---   *   ---   *   ---
@@ -56,15 +59,12 @@ St::vconst {
 
 
   ext    => '.daf',
-  sig    => 0xAFBD,
+  sig    => 0xF0DA,
 
   tab_t  => sub {
 
     my $class=$_[0];
     my $struc=struc "$class.tab_t" => q[
-
-      cstr path;
-
       word loc;
       word ezy;
 
@@ -296,14 +296,46 @@ sub fclose($self) {
 };
 
 # ---   *   ---   *   ---
+# given an entry's location,
+# read it's path
+
+sub get_path($self,$lkup) {
+
+
+  # get ctx
+  my $body   = $self->{body};
+  my $blk_sz = $self->{blk_sz};
+  my $loc    = $lkup->{loc};
+
+  seek $body,$loc * $blk_sz,0;
+
+
+  # iter
+  my $out   = null;
+  my $chunk = null;
+
+  while(read $body,$chunk,$blk_sz) {
+
+    my $len  = cstrlen \$chunk;
+       $out .= substr $chunk,0,$len;
+
+    last if $len < $blk_sz;
+
+  };
+
+  return $out;
+
+};
+
+# ---   *   ---   *   ---
 # look for path in table
 
-sub fetch($self,$path) {
+sub fetch($self,$pathref) {
 
 
   # file in cache?
-  return $self->{cache}->{$path}
-  if exists $self->{cache}->{$path};
+  return $self->{cache}->{$$pathref}
+  if exists $self->{cache}->{$$pathref};
 
 
   # get ctx
@@ -326,7 +358,8 @@ sub fetch($self,$path) {
 
 
     # found requested?
-    if($elem->{path} eq $path) {
+    $elem->{path}=$self->get_path($elem);
+    if($elem->{path} eq $$pathref) {
 
       $out=$elem;
       $out->{tabptr}=$addr;
@@ -337,11 +370,7 @@ sub fetch($self,$path) {
 
 
     # ^nope, go next
-    $addr += (
-      $have->{len}
-    + length $elem->{path}
-
-    );
+    $addr += $have->{len};
 
   };
 
@@ -353,16 +382,20 @@ sub fetch($self,$path) {
 # ---   *   ---   *   ---
 # align and zero-pad input data
 
-sub pack_data($self,$type,$data) {
+sub pack_data($self,$type,$data,$pathref) {
 
 
   # get ctx
   my $blk_sz = $self->{blk_sz};
 
 
-  # layas struc
-  my $have    = bpack $type,@$data;
-  my $dataref = \$have->{ct};
+  # combine path and struc
+  my $path=bpack cstr=>$$pathref;
+  my $have=bpack $type,@$data;
+
+  $have->{ct}  =  $path->{ct} . $have->{ct};
+  my $dataref  = \$have->{ct};
+
 
   # get required/aligned size
   my $req    = length $$dataref;
@@ -390,7 +423,7 @@ sub pack_data($self,$type,$data) {
 # ---   *   ---   *   ---
 # write element at end of table
 
-sub new_elem($self,$pathref,$data) {
+sub new_elem($self,$data) {
 
 
   # get ctx
@@ -406,12 +439,12 @@ sub new_elem($self,$pathref,$data) {
   my $elem=Bpack::layas(
 
     $self->tab_t,
-    $$pathref,
 
     int_urdiv($ptr,$blk_sz),
     $data->{ezy}-1
 
   );
+
 
   # ^cat to end of file
   my $have=bpack $tab_t,$elem;
@@ -443,19 +476,12 @@ sub update_elem($self,$lkup,$data) {
 
   # get old elem size
   my $old_body = ($lkup->{ezy}+1) * $blk_sz;
-  my $old_tab  = (
-    $tab_t->{sizeof}
-  + length $lkup->{path}
-
-  );
 
 
   # align and bytepack
   my $elem=Bpack::layas(
 
     $self->tab_t,
-
-    $lkup->{path},
 
     $bodyptr,
     $data->{ezy}-1
@@ -468,43 +494,13 @@ sub update_elem($self,$lkup,$data) {
 
   substr $self->{tab},
     $tabptr,
-    $old_tab,
+    $tab_t->{sizeof},
     $have->{ct};
 
 
-  # need to move neighbors?
-  if($old_body != $data->{total}
-  && $bodyptr  <  $self->{blkcnt}-1) {
-
-    # separate left and dump new
-    my ($dst,$tmp)=
-      $self->cut($bodyptr,$old_body);
-
-    print {$self->{body}} ${$data->{bytes}};
-
-    # ^combine both files and cleanup
-    `cat   $tmp >> $dst`;
-    unlink $tmp;
-
-
-    # propagate changes to table
-    $self->on_cut(
-      $tabptr,
-      $old_body,
-      $data->{total}
-
-    );
-
-    $self->{blkcnt} -= int_urdiv $old_body,$blk_sz;
-    $self->{blkcnt} += $data->{ezy};
-
-
-  # ^nope, just write!
-  } else {
-    seek  $self->{body},($bodyptr) * $blk_sz,0;
-    print {$self->{body}} ${$data->{bytes}};
-
-  };
+  # update content
+  seek  $self->{body},($bodyptr) * $blk_sz,0;
+  print {$self->{body}} ${$data->{bytes}};
 
 
   return;
@@ -585,14 +581,6 @@ sub on_cut($self,$ptr,$old,$new) {
     my $elem=$have->{ct}->[0];
 
 
-    # ^get size
-    my $step=(
-      $tab_t->{sizeof}
-    + length $elem->{path}
-
-    );
-
-
     # adjust all entries after first one!
     if($addr > $ptr) {
 
@@ -600,13 +588,13 @@ sub on_cut($self,$ptr,$old,$new) {
       $have=bpack $tab_t,$elem;
 
       substr $self->{tab},
-        $addr,$step,$have->{ct};
+        $addr,$tab_t->{sizeof},$have->{ct};
 
     };
 
 
     # go next
-    $addr += $step;
+    $addr += $tab_t->{sizeof};
 
 
   };
@@ -623,13 +611,13 @@ sub store($self,$path,$type,$data) {
 
 
   # pack data and find where to put it ;>
-  my $have = $self->pack_data($type,$data);
-  my $lkup = $self->alloc($path,$have->{ezy}-1);
+  my $have = $self->pack_data($type,$data,\$path);
+  my $lkup = $self->alloc(\$path,$have->{ezy}-1);
 
 
   # existing path?
   if(! defined $lkup) {
-    $self->new_elem(\$path,$have);
+    $self->new_elem($have);
 
   } else {
     $self->update_elem($lkup,$have);
@@ -648,7 +636,11 @@ sub remove($self,$path) {
 
 
   # skip if not found
-  my $lkup=$self->fetch($path);
+  my $lkup=(! is_hashref $path)
+    ? $self->fetch(\$path)
+    : $path
+    ;
+
   return 0 if ! defined $lkup;
 
 
@@ -656,12 +648,6 @@ sub remove($self,$path) {
   my $tabptr = $lkup->{tabptr};
   my $blk_sz = $self->{blk_sz};
   my $tab_t  = $self->tab_t;
-
-  my $tab_sz = (
-    $tab_t->{sizeof}
-  + length $lkup->{path}
-
-  );
 
 
   # first or middle element?
@@ -691,10 +677,13 @@ sub remove($self,$path) {
 
   # clear table entry
   substr $self->{tab},
-    $tabptr,$tab_sz,null;
+    $tabptr,
+    $tab_t->{sizeof},
+    null;
 
   $self->{cnt}--;
   $self->{blkcnt} -= $lkup->{ezy}+1;
+
 
   return 1;
 
@@ -708,7 +697,7 @@ sub free($self,$path) {
 
   # skip if not found
   my $lkup=(! is_hashref $path)
-    ? $self->fetch($path)
+    ? $self->fetch(\$path)
     : $path
     ;
 
@@ -716,20 +705,17 @@ sub free($self,$path) {
 
 
   # get ctx
-  my $tabptr = $lkup->{tabptr};
-  my $blk_sz = $self->{blk_sz};
-  my $tab_t  = $self->tab_t;
+  my $tabptr  = $lkup->{tabptr};
+  my $blk_sz  = $self->{blk_sz};
+  my $tab_t   = $self->tab_t;
+
+  my $freeblk = $self->freeblk;
+  my $cstr    = typefet 'cstr';
 
 
   # we identify free entries by placing
   # a special value in the path ;>
   $lkup->{path}=$self->freeblk;
-
-  my $tab_sz = (
-    $tab_t->{sizeof}
-  + length $lkup->{path}
-
-  );
 
   # ^write back to table
   my $have=bpack $tab_t,$lkup;
@@ -737,7 +723,7 @@ sub free($self,$path) {
 
   substr $self->{tab},
     $lkup->{tabptr},
-    $tab_sz,
+    $tab_t->{sizeof},
     $have;
 
 
@@ -746,10 +732,13 @@ sub free($self,$path) {
   # this is not strictly necessary,
   # but it'll likely make the file
   # compress better
-  my $ezy=($lkup->{ezy}+1) * $blk_sz;
+  my $ezy  = ($lkup->{ezy}+1) * $blk_sz;
+  my $diff = $ezy-1-length $freeblk;
+
+  my $fmat = "$cstr->{packof}x[$diff]";
 
   seek  $self->{body},$lkup->{loc} * $blk_sz,0;
-  print {$self->{body}} pack "x[$ezy]";
+  print {$self->{body}} pack $fmat,$freeblk;
 
 
   return 1;
@@ -762,7 +751,7 @@ sub free($self,$path) {
 # if none found, look for
 # a free block matching size
 
-sub alloc($self,$path,$ezy) {
+sub alloc($self,$pathref,$ezy) {
 
 
   # get ctx
@@ -790,7 +779,8 @@ sub alloc($self,$path,$ezy) {
 
 
     # found requested?
-    if($elem->{path} eq $path) {
+    $elem->{path}=$self->get_path($elem);
+    if($elem->{path} eq $$pathref) {
 
       $req=$elem;
       $req->{tabptr}=$addr;
@@ -808,7 +798,6 @@ sub alloc($self,$path,$ezy) {
 
       $avail=$elem;
       $avail->{tabptr} = $addr;
-      $avail->{path}   = $path;
 
 
       # backup to this block if
@@ -821,17 +810,34 @@ sub alloc($self,$path,$ezy) {
 
 
     # ^nope, go next
-    $addr += (
-      $have->{len}
-    + length $elem->{path}
-
-    );
+    $addr += $tab_t->{sizeof};
 
   };
 
 
   $out //= $avail;
   return $out;
+
+};
+
+# ---   *   ---   *   ---
+# eliminates free blocks
+
+sub defrag($self) {
+
+  my $freeblk=$self->freeblk;
+
+  while(1) {
+
+    my $lkup=$self->fetch(\$freeblk);
+
+    last if! defined $lkup
+         ||! $self->remove($lkup);
+
+  };
+
+
+  return;
 
 };
 
@@ -863,13 +869,21 @@ my $pkg  = St::cpkg;
 my $daf  = $pkg->fnew('./testy');
 
 map {
-  $daf->store("x$ARG",'word',[(0x24|$ARG) x 9])
+  $daf->store("x$ARG",'word',[(0x2420|$ARG) x 8])
 
 } 0..2;
 
 $daf->free('x1');
-$daf->store('x1','word',[(0x2424) x 9]);
+$daf->free('x2');
+$daf->store('x3','word',[(0x2424) x 8]);
+
+$daf->defrag();
+
 $daf->fclose();
+
+# TODO
+#
+# * subdirs
 
 # ---   *   ---   *   ---
 1; # ret
