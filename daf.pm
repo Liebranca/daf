@@ -25,6 +25,7 @@ package daf;
   use lib "$ENV{ARPATH}/lib/sys/";
 
   use Style;
+  use Chk;
   use Type;
   use Bpack;
 
@@ -39,7 +40,7 @@ package daf;
 # ---   *   ---   *   ---
 # info
 
-  our $VERSION = v0.00.4;#a
+  our $VERSION = v0.00.5;#a
   our $AUTHOR  = 'IBN-3DILA';
 
 # ---   *   ---   *   ---
@@ -57,10 +58,10 @@ St::vconst {
   ext    => '.daf',
   sig    => 0xAFBD,
 
-  head_t => sub {
+  tab_t  => sub {
 
     my $class=$_[0];
-    my $struc=struc "$class.head_t" => q[
+    my $struc=struc "$class.tab_t" => q[
 
       cstr path;
 
@@ -73,10 +74,10 @@ St::vconst {
 
   },
 
-  meta_t => sub {
+  head_t => sub {
 
     my $class=$_[0];
-    my $struc=struc "$class.meta_t" => q[
+    my $struc=struc "$class.head_t" => q[
 
       word  sig;
       word  blk_sz;
@@ -88,6 +89,17 @@ St::vconst {
     ];
 
     return $struc;
+
+  },
+
+
+  freeblk    => "\x{7F}\$S",
+  freeblk_re => sub {
+
+    my $class = $_[0];
+    my $s     = $class->freeblk;
+
+    return qr{^$s$};
 
   },
 
@@ -124,7 +136,7 @@ sub new($class,$path,%O) {
     cnt    => 0,
     blkcnt => 0,
 
-    head   => '',
+    tab    => '',
     body   => undef,
 
     cache  => {},
@@ -182,16 +194,16 @@ sub fopen($class,$path,%O) {
   or croak strerr($path);
 
 
-  # read meta data
-  my $meta_t = $self->meta_t;
-  my $meta   = undef;
+  # read header
+  my $head_t = $self->head_t;
+  my $head   = undef;
 
   read $self->{body},
-    $meta,$meta_t->{sizeof};
+    $head,$head_t->{sizeof};
 
 
   # ^unpack and copy to memory
-  my $have=bunpack $meta_t,\$meta;
+  my $have=bunpack $head_t,\$head;
      $have=$have->{ct}->[0];
 
   $self->{break}      = $have->{break};
@@ -203,9 +215,9 @@ sub fopen($class,$path,%O) {
     1 << ($have->{blk_sz}+4);
 
 
-  # read header into memory
+  # read table into memory
   read $self->{body},
-    $self->{head},$self->{break};
+    $self->{tab},$self->{break};
 
   # put the remainder into tmp
   my $step = 0x1000;
@@ -257,21 +269,21 @@ sub fclose($self) {
   # make archive
   open my $fh,'+>',$dst;
 
-  # ^put meta
-  my $meta_t=$self->meta_t;
+  # ^put header
+  my $head_t=$self->head_t;
 
-  print {$fh} (pack $meta_t->{packof},
+  print {$fh} (pack $head_t->{packof},
 
     $self->sig,
     $self->{blk_sz_src},
     $self->{cnt},
     $self->{blkcnt},
 
-    length $self->{head},
+    length $self->{tab},
 
   );
 
-  print {$fh} $self->{head};
+  print {$fh} $self->{tab};
   close $fh;
 
 
@@ -284,7 +296,7 @@ sub fclose($self) {
 };
 
 # ---   *   ---   *   ---
-# look for path in header
+# look for path in table
 
 sub fetch($self,$path) {
 
@@ -295,20 +307,20 @@ sub fetch($self,$path) {
 
 
   # get ctx
-  my $limit  = length $self->{head};
-  my $head_t = $self->head_t;
+  my $limit = length $self->{tab};
+  my $tab_t = $self->tab_t;
 
 
-  # walk header
+  # walk table
   my $addr = 0x00;
   my $out  = undef;
 
   while($addr < $limit) {
 
 
-    # read header entry
-    my $have=bunpack $head_t,
-      \$self->{head},$addr;
+    # read table entry
+    my $have=bunpack $tab_t,
+      \$self->{tab},$addr;
 
     my $elem=$have->{ct}->[0];
 
@@ -317,7 +329,7 @@ sub fetch($self,$path) {
     if($elem->{path} eq $path) {
 
       $out=$elem;
-      $out->{headptr}=$addr;
+      $out->{tabptr}=$addr;
 
       last;
 
@@ -339,15 +351,18 @@ sub fetch($self,$path) {
 };
 
 # ---   *   ---   *   ---
-# builds header and zero-pads data
+# align and zero-pad input data
 
-sub pack_elem($self,$pathref,$dataref,$loc) {
+sub pack_data($self,$type,$data) {
 
 
   # get ctx
-  my $head_t = $self->head_t;
   my $blk_sz = $self->{blk_sz};
 
+
+  # layas struc
+  my $have    = bpack $type,@$data;
+  my $dataref = \$have->{ct};
 
   # get required/aligned size
   my $req    = length $$dataref;
@@ -360,24 +375,27 @@ sub pack_elem($self,$pathref,$dataref,$loc) {
   $$dataref .= pack "x[$diff]";
 
 
-  # build header entry
-  my $elem=Bpack::layas $head_t,
-    $$pathref,$loc,$ezy-1;
+  # pack and give!
+  return {
 
+    bytes => $dataref,
 
-  return (\$elem,$total,$ezy);
+    ezy   => $ezy,
+    total => $total,
+
+  };
 
 };
 
 # ---   *   ---   *   ---
 # write element at end of table
 
-sub new_elem($self,$pathref,$dataref) {
+sub new_elem($self,$pathref,$data) {
 
 
   # get ctx
-  my $head_t=$self->head_t;
-  my $blk_sz=$self->{blk_sz};
+  my $tab_t  = $self->tab_t;
+  my $blk_sz = $self->{blk_sz};
 
 
   # get end of file
@@ -385,102 +403,111 @@ sub new_elem($self,$pathref,$dataref) {
   my $ptr=tell $self->{body};
 
   # align and bytepack
-  my ($elemref,$total,$ezy)=$self->pack_elem(
+  my $elem=Bpack::layas(
 
-    $pathref,
-    $dataref,
+    $self->tab_t,
+    $$pathref,
 
-    int_urdiv $ptr,$blk_sz,
+    int_urdiv($ptr,$blk_sz),
+    $data->{ezy}-1
 
   );
 
   # ^cat to end of file
-  my $have=bpack $head_t,$$elemref;
+  my $have=bpack $tab_t,$elem;
 
-  $self->{head} .= $have->{ct};
-  print {$self->{body}} $$dataref;
+  $self->{tab} .= $have->{ct};
+  print {$self->{body}} ${$data->{bytes}};
 
   $self->{cnt}++;
-  $self->{blkcnt} += $ezy;
+  $self->{blkcnt} += $data->{ezy};
 
-  return $total;
+  return;
 
 };
 
 # ---   *   ---   *   ---
 # ^write to specific element
 
-sub update_elem($self,$lkup,$dataref) {
+sub update_elem($self,$lkup,$data) {
 
 
   # get ctx
-  my $head_t=$self->head_t;
-  my $blk_sz=$self->{blk_sz};
+  my $tab_t  = $self->tab_t;
+  my $blk_sz = $self->{blk_sz};
 
 
   # get pointers
   my $bodyptr = $lkup->{loc};
-  my $headptr = $lkup->{headptr};
+  my $tabptr  = $lkup->{tabptr};
 
   # get old elem size
   my $old_body = ($lkup->{ezy}+1) * $blk_sz;
-  my $old_head = (
-    $head_t->{sizeof}
+  my $old_tab  = (
+    $tab_t->{sizeof}
   + length $lkup->{path}
 
   );
 
 
   # align and bytepack
-  my ($elemref,$new,$ezy)=$self->pack_elem(
+  my $elem=Bpack::layas(
 
-    \$lkup->{path},
+    $self->tab_t,
 
-    $dataref,
+    $lkup->{path},
+
     $bodyptr,
+    $data->{ezy}-1
 
   );
 
 
-  # ^update header entry
-  my $have=bpack $head_t,$$elemref;
+  # ^update table entry
+  my $have=bpack $tab_t,$elem;
 
-  substr $self->{head},
-    $headptr,
-    $old_head,
+  substr $self->{tab},
+    $tabptr,
+    $old_tab,
     $have->{ct};
 
 
   # need to move neighbors?
-  if($old_body != $new
+  if($old_body != $data->{total}
   && $bodyptr  <  $self->{blkcnt}-1) {
 
     # separate left and dump new
     my ($dst,$tmp)=
       $self->cut($bodyptr,$old_body);
 
-    print {$self->{body}} $$dataref;
+    print {$self->{body}} ${$data->{bytes}};
 
     # ^combine both files and cleanup
     `cat   $tmp >> $dst`;
     unlink $tmp;
 
 
-    # propagate changes to header
-    $self->on_cut($headptr,$old_body,$new);
+    # propagate changes to table
+    $self->on_cut(
+      $tabptr,
+      $old_body,
+      $data->{total}
+
+    );
 
     $self->{blkcnt} -= int_urdiv $old_body,$blk_sz;
-    $self->{blkcnt} += $ezy;
+    $self->{blkcnt} += $data->{ezy};
 
 
   # ^nope, just write!
   } else {
     seek  $self->{body},($bodyptr) * $blk_sz,0;
-    print {$self->{body}} $$dataref;
+    print {$self->{body}} ${$data->{bytes}};
 
   };
 
-  return $new;
+
+  return;
 
 };
 
@@ -534,9 +561,9 @@ sub on_cut($self,$ptr,$old,$new) {
 
 
   # get ctx
-  my $limit  = length $self->{head};
+  my $limit  = length $self->{tab};
   my $blk_sz = $self->{blk_sz};
-  my $head_t = $self->head_t;
+  my $tab_t  = $self->tab_t;
 
   # get size change
   my $diff = abs       $new-$old;
@@ -545,22 +572,22 @@ sub on_cut($self,$ptr,$old,$new) {
   $diff = -$diff if $new < $old;
 
 
-  # walk header from ptr onwards
+  # walk table from ptr onwards
   my $addr=$ptr;
 
   while($addr < $limit) {
 
 
-    # read header entry
-    my $have=bunpack $head_t,
-      \$self->{head},$addr;
+    # read table entry
+    my $have=bunpack $tab_t,
+      \$self->{tab},$addr;
 
     my $elem=$have->{ct}->[0];
 
 
     # ^get size
     my $step=(
-      $head_t->{sizeof}
+      $tab_t->{sizeof}
     + length $elem->{path}
 
     );
@@ -570,9 +597,9 @@ sub on_cut($self,$ptr,$old,$new) {
     if($addr > $ptr) {
 
       $elem->{loc} += $diff;
-      $have=bpack $head_t,$elem;
+      $have=bpack $tab_t,$elem;
 
-      substr $self->{head},
+      substr $self->{tab},
         $addr,$step,$have->{ct};
 
     };
@@ -596,23 +623,21 @@ sub store($self,$path,$type,$data) {
 
 
   # pack data and find where to put it ;>
-  my $have  = bpack $type,@$data;
-  my $lkup  = $self->fetch($path);
-
-  my $total = 0x00;
+  my $have = $self->pack_data($type,$data);
+  my $lkup = $self->alloc($path,$have->{ezy}-1);
 
 
   # existing path?
   if(! defined $lkup) {
-    $total=$self->new_elem(\$path,\$have->{ct});
+    $self->new_elem(\$path,$have);
 
   } else {
-    $total=$self->update_elem($lkup,\$have->{ct});
+    $self->update_elem($lkup,$have);
 
   };
 
 
-  return $total;
+  return $have->{total};
 
 };
 
@@ -628,12 +653,12 @@ sub remove($self,$path) {
 
 
   # get ctx
-  my $headptr = $lkup->{headptr};
-  my $blk_sz  = $self->{blk_sz};
-  my $head_t  = $self->head_t;
+  my $tabptr = $lkup->{tabptr};
+  my $blk_sz = $self->{blk_sz};
+  my $tab_t  = $self->tab_t;
 
-  my $head_sz = (
-    $head_t->{sizeof}
+  my $tab_sz = (
+    $tab_t->{sizeof}
   + length $lkup->{path}
 
   );
@@ -652,7 +677,7 @@ sub remove($self,$path) {
     unlink $tmp;
 
     # book-keep
-    $self->on_cut($headptr,$stop,0);
+    $self->on_cut($tabptr,$stop,0);
 
 
   # ^last, truncate only!
@@ -664,14 +689,149 @@ sub remove($self,$path) {
   };
 
 
-  # clear header entry
-  substr $self->{head},
-    $headptr,$head_sz,null;
+  # clear table entry
+  substr $self->{tab},
+    $tabptr,$tab_sz,null;
 
   $self->{cnt}--;
   $self->{blkcnt} -= $lkup->{ezy}+1;
 
   return 1;
+
+};
+
+# ---   *   ---   *   ---
+# mark entry as avail
+
+sub free($self,$path) {
+
+
+  # skip if not found
+  my $lkup=(! is_hashref $path)
+    ? $self->fetch($path)
+    : $path
+    ;
+
+  return 0 if ! defined $lkup;
+
+
+  # get ctx
+  my $tabptr = $lkup->{tabptr};
+  my $blk_sz = $self->{blk_sz};
+  my $tab_t  = $self->tab_t;
+
+
+  # we identify free entries by placing
+  # a special value in the path ;>
+  $lkup->{path}=$self->freeblk;
+
+  my $tab_sz = (
+    $tab_t->{sizeof}
+  + length $lkup->{path}
+
+  );
+
+  # ^write back to table
+  my $have=bpack $tab_t,$lkup;
+     $have=$have->{ct};
+
+  substr $self->{tab},
+    $lkup->{tabptr},
+    $tab_sz,
+    $have;
+
+
+  # zero-flood content
+  #
+  # this is not strictly necessary,
+  # but it'll likely make the file
+  # compress better
+  my $ezy=($lkup->{ezy}+1) * $blk_sz;
+
+  seek  $self->{body},$lkup->{loc} * $blk_sz,0;
+  print {$self->{body}} pack "x[$ezy]";
+
+
+  return 1;
+
+};
+
+# ---   *   ---   *   ---
+# find block matching path and size
+#
+# if none found, look for
+# a free block matching size
+
+sub alloc($self,$path,$ezy) {
+
+
+  # get ctx
+  my $limit   = length $self->{tab};
+  my $tab_t   = $self->tab_t;
+  my $freeblk = $self->freeblk;
+
+
+  # walk table
+  my $addr  = 0x00;
+
+  my $req   = undef;
+  my $avail = undef;
+  my $out   = undef;
+
+
+  while($addr < $limit) {
+
+
+    # read table entry
+    my $have=bunpack $tab_t,
+      \$self->{tab},$addr;
+
+    my $elem=$have->{ct}->[0];
+
+
+    # found requested?
+    if($elem->{path} eq $path) {
+
+      $req=$elem;
+      $req->{tabptr}=$addr;
+
+      # stop if size matches ;>
+      $out=$req if $elem->{ezy} eq $ezy;
+
+
+    # ^found free block matching size?
+    } elsif(
+       $elem->{path} eq $freeblk
+    && $elem->{ezy}  eq $ezy
+
+    ) {
+
+      $avail=$elem;
+      $avail->{tabptr} = $addr;
+      $avail->{path}   = $path;
+
+
+      # backup to this block if
+      # requested doesn't fit!
+      $out=$avail if defined $req;
+
+    };
+
+    last if defined $out;
+
+
+    # ^nope, go next
+    $addr += (
+      $have->{len}
+    + length $elem->{path}
+
+    );
+
+  };
+
+
+  $out //= $avail;
+  return $out;
 
 };
 
@@ -707,7 +867,8 @@ map {
 
 } 0..2;
 
-$daf->remove('x1');
+$daf->free('x1');
+$daf->store('x1','word',[(0x2424) x 9]);
 $daf->fclose();
 
 # ---   *   ---   *   ---
