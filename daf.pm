@@ -39,7 +39,7 @@ package daf;
 # ---   *   ---   *   ---
 # info
 
-  our $VERSION = v0.00.3;#a
+  our $VERSION = v0.00.4;#a
   our $AUTHOR  = 'IBN-3DILA';
 
 # ---   *   ---   *   ---
@@ -81,7 +81,8 @@ St::vconst {
       word  sig;
       word  blk_sz;
 
-      dword cnt;
+      word  cnt;
+      word  blkcnt;
       qword break;
 
     ];
@@ -121,6 +122,7 @@ sub new($class,$path,%O) {
 
     path   => $path,
     cnt    => 0,
+    blkcnt => 0,
 
     head   => '',
     body   => undef,
@@ -194,6 +196,7 @@ sub fopen($class,$path,%O) {
 
   $self->{break}      = $have->{break};
   $self->{cnt}        = $have->{cnt};
+  $self->{blkcnt}     = $have->{blkcnt};
   $self->{blk_sz_src} = $have->{blk_sz};
 
   $self->{blk_sz}     =
@@ -262,6 +265,7 @@ sub fclose($self) {
     $self->sig,
     $self->{blk_sz_src},
     $self->{cnt},
+    $self->{blkcnt},
 
     length $self->{head},
 
@@ -361,7 +365,7 @@ sub pack_elem($self,$pathref,$dataref,$loc) {
     $$pathref,$loc,$ezy-1;
 
 
-  return (\$elem,$total);
+  return (\$elem,$total,$ezy);
 
 };
 
@@ -381,7 +385,7 @@ sub new_elem($self,$pathref,$dataref) {
   my $ptr=tell $self->{body};
 
   # align and bytepack
-  my ($elemref,$total)=$self->pack_elem(
+  my ($elemref,$total,$ezy)=$self->pack_elem(
 
     $pathref,
     $dataref,
@@ -397,6 +401,7 @@ sub new_elem($self,$pathref,$dataref) {
   print {$self->{body}} $$dataref;
 
   $self->{cnt}++;
+  $self->{blkcnt} += $ezy;
 
   return $total;
 
@@ -427,7 +432,7 @@ sub update_elem($self,$lkup,$dataref) {
 
 
   # align and bytepack
-  my ($elemref,$new) =$self->pack_elem(
+  my ($elemref,$new,$ezy)=$self->pack_elem(
 
     \$lkup->{path},
 
@@ -448,7 +453,7 @@ sub update_elem($self,$lkup,$dataref) {
 
   # need to move neighbors?
   if($old_body != $new
-  && $bodyptr  <  $self->{cnt}-1) {
+  && $bodyptr  <  $self->{blkcnt}-1) {
 
     # separate left and dump new
     my ($dst,$tmp)=
@@ -457,8 +462,15 @@ sub update_elem($self,$lkup,$dataref) {
     print {$self->{body}} $$dataref;
 
     # ^combine both files and cleanup
-    `cat     $tmp >> $dst`;
-    unlink   $tmp;
+    `cat   $tmp >> $dst`;
+    unlink $tmp;
+
+
+    # propagate changes to header
+    $self->on_cut($headptr,$old_body,$new);
+
+    $self->{blkcnt} -= int_urdiv $old_body,$blk_sz;
+    $self->{blkcnt} += $ezy;
 
 
   # ^nope, just write!
@@ -510,7 +522,70 @@ sub cut($self,$ptr,$size) {
   truncate $self->{body},$ptr * $blk_sz;
   seek     $self->{body},0,2;
 
+
   return ($body,$tmp);
+
+};
+
+# ---   *   ---   *   ---
+# ^book-keeping
+
+sub on_cut($self,$ptr,$old,$new) {
+
+
+  # get ctx
+  my $limit  = length $self->{head};
+  my $blk_sz = $self->{blk_sz};
+  my $head_t = $self->head_t;
+
+  # get size change
+  my $diff = abs       $new-$old;
+     $diff = int_urdiv $diff,$blk_sz;
+
+  $diff = -$diff if $new < $old;
+
+
+  # walk header from ptr onwards
+  my $addr=$ptr;
+
+  while($addr < $limit) {
+
+
+    # read header entry
+    my $have=bunpack $head_t,
+      \$self->{head},$addr;
+
+    my $elem=$have->{ct}->[0];
+
+
+    # ^get size
+    my $step=(
+      $head_t->{sizeof}
+    + length $elem->{path}
+
+    );
+
+
+    # adjust all entries after first one!
+    if($addr > $ptr) {
+
+      $elem->{loc} += $diff;
+      $have=bpack $head_t,$elem;
+
+      substr $self->{head},
+        $addr,$step,$have->{ct};
+
+    };
+
+
+    # go next
+    $addr += $step;
+
+
+  };
+
+
+  return;
 
 };
 
@@ -557,7 +632,6 @@ sub remove($self,$path) {
   my $blk_sz  = $self->{blk_sz};
   my $head_t  = $self->head_t;
 
-
   my $head_sz = (
     $head_t->{sizeof}
   + length $lkup->{path}
@@ -565,13 +639,8 @@ sub remove($self,$path) {
   );
 
 
-  # clear header entry
-  substr $self->{head},
-    $headptr,$head_sz,null;
-
-
   # first or middle element?
-  if($lkup->{loc} < $self->{cnt}-1) {
+  if($lkup->{loc} < $self->{blkcnt}-1) {
 
     # separate left and discard
     my $stop=($lkup->{ezy}+1) * $blk_sz;
@@ -582,6 +651,9 @@ sub remove($self,$path) {
     `cat   $tmp >> $dst`;
     unlink $tmp;
 
+    # book-keep
+    $self->on_cut($headptr,$stop,0);
+
 
   # ^last, truncate only!
   } else {
@@ -591,6 +663,13 @@ sub remove($self,$path) {
 
   };
 
+
+  # clear header entry
+  substr $self->{head},
+    $headptr,$head_sz,null;
+
+  $self->{cnt}--;
+  $self->{blkcnt} -= $lkup->{ezy}+1;
 
   return 1;
 
@@ -624,18 +703,11 @@ my $pkg  = St::cpkg;
 my $daf  = $pkg->fnew('./testy');
 
 map {
-  $daf->store("x$ARG",'word',[0x24|$ARG])
+  $daf->store("x$ARG",'word',[(0x24|$ARG) x 9])
 
 } 0..2;
 
-$daf->store('x1','word',[0x21]);
-$daf->fclose();
-
-
-$daf=$pkg->fopen('./testy');
-
-$daf->store('x1','word',[0x22]);
-$daf->remove('x0');
+$daf->remove('x1');
 $daf->fclose();
 
 # ---   *   ---   *   ---
