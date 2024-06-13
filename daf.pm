@@ -43,7 +43,7 @@ package daf;
 # ---   *   ---   *   ---
 # info
 
-  our $VERSION = v0.00.6;#a
+  our $VERSION = v0.00.7;#a
   our $AUTHOR  = 'IBN-3DILA';
 
 # ---   *   ---   *   ---
@@ -65,7 +65,6 @@ St::vconst {
 
     my $class=$_[0];
     my $struc=struc "$class.tab_t" => q[
-      word loc;
       word ezy;
 
     ];
@@ -84,7 +83,6 @@ St::vconst {
 
       word  cnt;
       word  blkcnt;
-      qword break;
 
     ];
 
@@ -102,6 +100,8 @@ St::vconst {
     return qr{^$s$};
 
   },
+
+  dumpstep   => 0x1000,
 
 };
 
@@ -136,8 +136,7 @@ sub new($class,$path,%O) {
     cnt    => 0,
     blkcnt => 0,
 
-    tab    => '',
-    body   => undef,
+    fh     => undef,
 
     cache  => {},
     blk_sz => $O{blk_sz},
@@ -168,11 +167,23 @@ sub fnew($class,$path,%O) {
 
 
   # get ice
-  my $self=$class->new($path,%O);
+  my $self   = $class->new($path,%O);
+  my $head_t = $self->head_t;
 
-  # make tmp file
-  open $self->{body},'+>',$self->ftmp
+
+  # make file
+  open $self->{fh},'+>',$path . $self->ext
   or croak strerr($path);
+
+  # ^put blank header
+  print {$self->{fh}} (pack $head_t->{packof},
+
+    $self->sig,
+    $self->{blk_sz_src},
+    $self->{cnt},
+    $self->{blkcnt},
+
+  );
 
   return $self;
 
@@ -188,7 +199,7 @@ sub fopen($class,$path,%O) {
   my $self=$class->new($path,%O);
 
   # get content
-  open $self->{body},'+<',
+  open $self->{fh},'+<',
     $self->{path} . $self->ext
 
   or croak strerr($path);
@@ -198,7 +209,7 @@ sub fopen($class,$path,%O) {
   my $head_t = $self->head_t;
   my $head   = undef;
 
-  read $self->{body},
+  read $self->{fh},
     $head,$head_t->{sizeof};
 
 
@@ -206,7 +217,6 @@ sub fopen($class,$path,%O) {
   my $have=bunpack $head_t,\$head;
      $have=$have->{ct}->[0];
 
-  $self->{break}      = $have->{break};
   $self->{cnt}        = $have->{cnt};
   $self->{blkcnt}     = $have->{blkcnt};
   $self->{blk_sz_src} = $have->{blk_sz};
@@ -214,39 +224,6 @@ sub fopen($class,$path,%O) {
   $self->{blk_sz}     =
     1 << ($have->{blk_sz}+4);
 
-
-  # read table into memory
-  read $self->{body},
-    $self->{tab},$self->{break};
-
-  # put the remainder into tmp
-  my $step = 0x1000;
-
-  my $eof  = -s $self->{body};
-  my $addr = tell $self->{body};
-
-  open my $tmp,'+>',$self->ftmp;
-
-
-  # ^one page at a time ;>
-  while($addr < $eof) {
-
-    my $chunk = null;
-    my $left  = $eof-$addr;
-
-    $step=$left if $step > $left;
-
-    read  $self->{body},$chunk,$step;
-    print {$tmp} $chunk;
-
-    $addr += $step;
-
-  };
-
-
-  # swap and give
-  close $self->{body};
-  $self->{body}=$tmp;
 
   return $self;
 
@@ -258,20 +235,16 @@ sub fopen($class,$path,%O) {
 sub fclose($self) {
 
 
-  # get filenames
-  my $body = $self->ftmp;
-  my $dst  = $self->{path} . $self->ext;
-
-  # close tmp files
-  close $self->{body};
+  # get ctx
+  my $fh  = $self->{fh};
+  my $dst = $self->{path} . $self->ext;
 
 
-  # make archive
-  open my $fh,'+>',$dst;
-
-  # ^put header
+  # rewind to header
+  seek $fh,0,0;
   my $head_t=$self->head_t;
 
+  # ^put data
   print {$fh} (pack $head_t->{packof},
 
     $self->sig,
@@ -279,51 +252,110 @@ sub fclose($self) {
     $self->{cnt},
     $self->{blkcnt},
 
-    length $self->{tab},
-
   );
 
-  print {$fh} $self->{tab};
+
+  # close file and give
   close $fh;
+  return;
+
+};
+
+# ---   *   ---   *   ---
+# load element at cursor
+# into memory
+
+sub read_elem($self) {
 
 
-  # ^cat em and cleanup
-  `cat   $body >> $dst`;
-  unlink $body;
+  # get ctx
+  my $fh     = $self->{fh};
+  my $blk_sz = $self->{blk_sz};
+  my $tab_t  = $self->tab_t;
+
+  my $loc    = tell $fh;
+
+
+  # catch EOF
+  my $chunk = null;
+  my $have  = read $fh,$chunk,$blk_sz;
+
+  return undef if ! $have;
+
+
+  # get element size
+  my $elem=substr $chunk,0,$tab_t->{sizeof},null;
+     $elem=bunpack $tab_t,\$elem;
+
+  $elem         = $elem->{ct}->[0];
+
+  $elem->{path} = null;
+  $elem->{base} = $loc;
+  $elem->{loc}  = $loc + $tab_t->{sizeof} + 1;
+
+
+  # get element path
+  my $len=cstrlen \$chunk;
+
+  $elem->{path} .= substr $chunk,0,$len;
+  $elem->{loc}  += $len;
+
+  # done?
+  return $elem
+  if $len < $blk_sz - $tab_t->{sizeof};
+
+
+  # ^nope, read more blocks!
+  while(read $fh,$chunk,$blk_sz) {
+
+    my $len=cstrlen \$chunk;
+
+    $elem->{path} .= substr $chunk,0,$len;
+    $elem->{loc}  += $len;
+
+    last if $len < $blk_sz;
+
+  };
+
+
+  return $elem;
+
+};
+
+# ---   *   ---   *   ---
+# seek to begging of file,
+# skipping header
+
+sub rewind($self) {
+
+  my $head_t=$self->head_t;
+  seek $self->{fh},$head_t->{sizeof},0;
 
   return;
 
 };
 
 # ---   *   ---   *   ---
-# given an entry's location,
-# read it's path
+# seek to beggining of element
 
-sub get_path($self,$lkup) {
+sub seek_this_elem($self,$elem) {
+  return seek $self->{fh},$elem->{base},0;
 
+};
+
+# ---   *   ---   *   ---
+# seek to beggining of next element
+
+sub seek_next_elem($self,$from) {
 
   # get ctx
-  my $body   = $self->{body};
   my $blk_sz = $self->{blk_sz};
-  my $loc    = $lkup->{loc};
+  my $base   = $from->{base};
 
-  seek $body,$loc * $blk_sz,0;
+  # get offset and seek
+  $base += ($from->{ezy}+1) * $blk_sz;
 
-
-  # iter
-  my $out   = null;
-  my $chunk = null;
-
-  while(read $body,$chunk,$blk_sz) {
-
-    my $len  = cstrlen \$chunk;
-       $out .= substr $chunk,0,$len;
-
-    last if $len < $blk_sz;
-
-  };
-
-  return $out;
+  return seek $self->{fh},$base,0;
 
 };
 
@@ -339,38 +371,29 @@ sub fetch($self,$pathref) {
 
 
   # get ctx
-  my $limit = length $self->{tab};
-  my $tab_t = $self->tab_t;
+  my $blk_sz = $self->{blk_sz};
+  my $out    = undef;
+
+  $self->rewind();
 
 
   # walk table
-  my $addr = 0x00;
-  my $out  = undef;
+  while(defined (
+    my $elem=$self->read_elem()
 
-  while($addr < $limit) {
-
-
-    # read table entry
-    my $have=bunpack $tab_t,
-      \$self->{tab},$addr;
-
-    my $elem=$have->{ct}->[0];
+  )) {
 
 
     # found requested?
-    $elem->{path}=$self->get_path($elem);
     if($elem->{path} eq $$pathref) {
-
       $out=$elem;
-      $out->{tabptr}=$addr;
-
       last;
 
     };
 
 
     # ^nope, go next
-    $addr += $have->{len};
+    last if ! $self->seek_next_elem($elem);
 
   };
 
@@ -387,21 +410,35 @@ sub pack_data($self,$type,$data,$pathref) {
 
   # get ctx
   my $blk_sz = $self->{blk_sz};
+  my $tab_t  = $self->tab_t;
 
 
-  # combine path and struc
-  my $path=bpack cstr=>$$pathref;
-  my $have=bpack $type,@$data;
+  # combine tab, path and data
+  my $path = bpack cstr=>$$pathref;
+  my $have = bpack $type,@$data;
 
-  $have->{ct}  =  $path->{ct} . $have->{ct};
-  my $dataref  = \$have->{ct};
+
+  $have->{ct}=
+    $path->{ct}
+  . $have->{ct};
 
 
   # get required/aligned size
-  my $req    = length $$dataref;
+  my $req    = $tab_t->{sizeof}+length $have->{ct};
   my $ezy    = int_urdiv $req,$blk_sz;
 
   my $total  = $ezy * $blk_sz;
+
+  # ^record size!
+  my $tab = Bpack::layas $tab_t,$ezy-1;
+     $tab = bpack $tab_t => $tab;
+
+  $have->{ct}=
+    $tab->{ct}
+  . $have->{ct};
+
+  my $dataref=\$have->{ct};
+
 
   # ^zero-pad
   my $diff   = $total-$req;
@@ -421,36 +458,12 @@ sub pack_data($self,$type,$data,$pathref) {
 };
 
 # ---   *   ---   *   ---
-# write element at end of table
+# write element at end of file
 
 sub new_elem($self,$data) {
 
-
-  # get ctx
-  my $tab_t  = $self->tab_t;
-  my $blk_sz = $self->{blk_sz};
-
-
-  # get end of file
-  seek $self->{body},0,2;
-  my $ptr=tell $self->{body};
-
-  # align and bytepack
-  my $elem=Bpack::layas(
-
-    $self->tab_t,
-
-    int_urdiv($ptr,$blk_sz),
-    $data->{ezy}-1
-
-  );
-
-
-  # ^cat to end of file
-  my $have=bpack $tab_t,$elem;
-
-  $self->{tab} .= $have->{ct};
-  print {$self->{body}} ${$data->{bytes}};
+  seek  $self->{fh},0,2;
+  print {$self->{fh}} ${$data->{bytes}};
 
   $self->{cnt}++;
   $self->{blkcnt} += $data->{ezy};
@@ -463,44 +476,40 @@ sub new_elem($self,$data) {
 # ^write to specific element
 
 sub update_elem($self,$lkup,$data) {
+  $self->seek_this_elem($lkup);
+  print {$self->{fh}} ${$data->{bytes}};
+
+  return;
+
+};
+
+# ---   *   ---   *   ---
+# write element to another file
+
+sub dump_elem($self,$dst,$lkup) {
 
 
   # get ctx
-  my $tab_t  = $self->tab_t;
+  my $step   = $self->dumpstep;
   my $blk_sz = $self->{blk_sz};
+  my $total  = ($lkup->{ezy}+1) * $blk_sz;
+
+  my $chunk  = null;
 
 
-  # get pointers
-  my $bodyptr = $lkup->{loc};
-  my $tabptr  = $lkup->{tabptr};
+  # write content in chunks until end
+  $self->seek_this_elem($lkup);
 
-  # get old elem size
-  my $old_body = ($lkup->{ezy}+1) * $blk_sz;
+  while($total) {
 
+    $step=$total if $step > $total;
 
-  # align and bytepack
-  my $elem=Bpack::layas(
+    read  $self->{fh},$chunk,$step;
+    print {$dst} $chunk;
 
-    $self->tab_t,
+    $total -= $step;
 
-    $bodyptr,
-    $data->{ezy}-1
-
-  );
-
-
-  # ^update table entry
-  my $have=bpack $tab_t,$elem;
-
-  substr $self->{tab},
-    $tabptr,
-    $tab_t->{sizeof},
-    $have->{ct};
-
-
-  # update content
-  seek  $self->{body},($bodyptr) * $blk_sz,0;
-  print {$self->{body}} ${$data->{bytes}};
+  };
 
 
   return;
@@ -518,7 +527,7 @@ sub cut($self,$ptr,$size) {
   my $ezy    = int_urdiv $size,$blk_sz;
 
   # path to [dst => tmp]
-  my $body = $self->ftmp;
+  my $body = $self->{fh};
   my $tmp  = $self->ftmp(1);
 
 
@@ -542,65 +551,11 @@ sub cut($self,$ptr,$size) {
 
 
   # remove left and seek to end
-  truncate $self->{body},$ptr * $blk_sz;
-  seek     $self->{body},0,2;
+  truncate $self->{fh},$ptr * $blk_sz;
+  seek     $self->{fh},0,2;
 
 
   return ($body,$tmp);
-
-};
-
-# ---   *   ---   *   ---
-# ^book-keeping
-
-sub on_cut($self,$ptr,$old,$new) {
-
-
-  # get ctx
-  my $limit  = length $self->{tab};
-  my $blk_sz = $self->{blk_sz};
-  my $tab_t  = $self->tab_t;
-
-  # get size change
-  my $diff = abs       $new-$old;
-     $diff = int_urdiv $diff,$blk_sz;
-
-  $diff = -$diff if $new < $old;
-
-
-  # walk table from ptr onwards
-  my $addr=$ptr;
-
-  while($addr < $limit) {
-
-
-    # read table entry
-    my $have=bunpack $tab_t,
-      \$self->{tab},$addr;
-
-    my $elem=$have->{ct}->[0];
-
-
-    # adjust all entries after first one!
-    if($addr > $ptr) {
-
-      $elem->{loc} += $diff;
-      $have=bpack $tab_t,$elem;
-
-      substr $self->{tab},
-        $addr,$tab_t->{sizeof},$have->{ct};
-
-    };
-
-
-    # go next
-    $addr += $tab_t->{sizeof};
-
-
-  };
-
-
-  return;
 
 };
 
@@ -630,66 +585,6 @@ sub store($self,$path,$type,$data) {
 };
 
 # ---   *   ---   *   ---
-# remove element
-
-sub remove($self,$path) {
-
-
-  # skip if not found
-  my $lkup=(! is_hashref $path)
-    ? $self->fetch(\$path)
-    : $path
-    ;
-
-  return 0 if ! defined $lkup;
-
-
-  # get ctx
-  my $tabptr = $lkup->{tabptr};
-  my $blk_sz = $self->{blk_sz};
-  my $tab_t  = $self->tab_t;
-
-
-  # first or middle element?
-  if($lkup->{loc} < $self->{blkcnt}-1) {
-
-    # separate left and discard
-    my $stop=($lkup->{ezy}+1) * $blk_sz;
-    my ($dst,$tmp)=
-      $self->cut($lkup->{loc},$stop);
-
-    # ^combine both files and cleanup
-    `cat   $tmp >> $dst`;
-    unlink $tmp;
-
-    # book-keep
-    $self->on_cut($tabptr,$stop,0);
-
-
-  # ^last, truncate only!
-  } else {
-
-    truncate $self->{body},
-      $lkup->{loc} * $blk_sz;
-
-  };
-
-
-  # clear table entry
-  substr $self->{tab},
-    $tabptr,
-    $tab_t->{sizeof},
-    null;
-
-  $self->{cnt}--;
-  $self->{blkcnt} -= $lkup->{ezy}+1;
-
-
-  return 1;
-
-};
-
-# ---   *   ---   *   ---
 # mark entry as avail
 
 sub free($self,$path) {
@@ -705,7 +600,6 @@ sub free($self,$path) {
 
 
   # get ctx
-  my $tabptr  = $lkup->{tabptr};
   my $blk_sz  = $self->{blk_sz};
   my $tab_t   = $self->tab_t;
 
@@ -717,28 +611,33 @@ sub free($self,$path) {
   # a special value in the path ;>
   $lkup->{path}=$self->freeblk;
 
-  # ^write back to table
-  my $have=bpack $tab_t,$lkup;
-     $have=$have->{ct};
-
-  substr $self->{tab},
-    $lkup->{tabptr},
-    $tab_t->{sizeof},
-    $have;
-
 
   # zero-flood content
   #
   # this is not strictly necessary,
   # but it'll likely make the file
   # compress better
+
   my $ezy  = ($lkup->{ezy}+1) * $blk_sz;
-  my $diff = $ezy-1-length $freeblk;
+  my $diff = (
 
-  my $fmat = "$cstr->{packof}x[$diff]";
+    $ezy-1
 
-  seek  $self->{body},$lkup->{loc} * $blk_sz,0;
-  print {$self->{body}} pack $fmat,$freeblk;
+  - (length $freeblk)
+  - $tab_t->{sizeof}
+
+  );
+
+  my $fmat =
+    $tab_t->{packof}
+  . $cstr->{packof}
+  . "x[$diff]";
+
+  $self->seek_this_elem($lkup);
+
+  print {$self->{fh}} pack $fmat,
+    $lkup->{ezy},
+    $freeblk;
 
 
   return 1;
@@ -755,35 +654,26 @@ sub alloc($self,$pathref,$ezy) {
 
 
   # get ctx
-  my $limit   = length $self->{tab};
-  my $tab_t   = $self->tab_t;
   my $freeblk = $self->freeblk;
+  $self->rewind();
 
 
   # walk table
-  my $addr  = 0x00;
-
   my $req   = undef;
   my $avail = undef;
   my $out   = undef;
 
 
-  while($addr < $limit) {
+  while(defined (
+    my $elem=$self->read_elem()
 
-
-    # read table entry
-    my $have=bunpack $tab_t,
-      \$self->{tab},$addr;
-
-    my $elem=$have->{ct}->[0];
+  )) {
 
 
     # found requested?
-    $elem->{path}=$self->get_path($elem);
     if($elem->{path} eq $$pathref) {
 
       $req=$elem;
-      $req->{tabptr}=$addr;
 
       # stop if size matches ;>
       $out=$req if $elem->{ezy} eq $ezy;
@@ -797,8 +687,6 @@ sub alloc($self,$pathref,$ezy) {
     ) {
 
       $avail=$elem;
-      $avail->{tabptr} = $addr;
-
 
       # backup to this block if
       # requested doesn't fit!
@@ -810,7 +698,7 @@ sub alloc($self,$pathref,$ezy) {
 
 
     # ^nope, go next
-    $addr += $tab_t->{sizeof};
+    last if ! $self->seek_next_elem($elem);
 
   };
 
@@ -825,17 +713,67 @@ sub alloc($self,$pathref,$ezy) {
 
 sub defrag($self) {
 
-  my $freeblk=$self->freeblk;
 
-  while(1) {
+  # get ctx
+  my $freeblk = $self->freeblk;
+  my $head_t  = $self->head_t;
+  my $tmp     = $self->ftmp(1);
 
-    my $lkup=$self->fetch(\$freeblk);
 
-    last if! defined $lkup
-         ||! $self->remove($lkup);
+  # open tmp file
+  open my $dst,'+>',$tmp
+  or croak strerr($tmp);
+
+  # ^put blank header
+  print {$dst} (pack $head_t->{packof},
+    0,0,0,0,
+
+  );
+
+  # reset header
+  $self->{cnt}    = 0;
+  $self->{blkcnt} = 0;
+
+  $self->rewind();
+
+
+  # walk file and discard unwanted
+  while(defined (
+    my $elem=$self->read_elem()
+
+  )) {
+
+
+    if($elem->{path} ne $freeblk) {
+
+      $self->dump_elem($dst,$elem);
+
+      $self->{cnt}++;
+      $self->{blkcnt} += $elem->{ezy}+1;
+
+    };
+
+    last if ! $self->seek_next_elem($elem);
 
   };
 
+
+  # ^overwrite header
+  seek  $dst,0,0;
+  print {$dst} (pack $head_t->{packof},
+    $self->sig,
+    $self->{blk_sz_src},
+    $self->{cnt},
+    $self->{blkcnt},
+
+  );
+
+
+  # ^swap!
+  close  $self->{fh};
+  rename $tmp,$self->{path} . $self->ext;
+
+  $self->{fh}=$dst;
 
   return;
 
@@ -878,7 +816,6 @@ $daf->free('x2');
 $daf->store('x3','word',[(0x2424) x 8]);
 
 $daf->defrag();
-
 $daf->fclose();
 
 # TODO
