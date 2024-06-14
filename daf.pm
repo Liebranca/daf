@@ -34,6 +34,7 @@ package daf;
 
   use Arstd::Path;
   use Arstd::Int;
+  use Arstd::Bytes qw(bitscanf bitscanr);
   use Arstd::IO;
   use Arstd::WLog;
   use Arstd::xd;
@@ -43,7 +44,7 @@ package daf;
 # ---   *   ---   *   ---
 # info
 
-  our $VERSION = v0.00.7;#a
+  our $VERSION = v0.00.8;#a
   our $AUTHOR  = 'IBN-3DILA';
 
 # ---   *   ---   *   ---
@@ -137,6 +138,7 @@ sub new($class,$path,%O) {
     blkcnt => 0,
 
     fh     => undef,
+    tab    => {mask=>[],size=>0,step=>0},
 
     cache  => {},
     blk_sz => $O{blk_sz},
@@ -570,10 +572,11 @@ sub store($self,$path,$type,$data) {
   my $lkup = $self->alloc(\$path,$have->{ezy}-1);
 
 
-  # existing path?
+  # making new entry?
   if(! defined $lkup) {
     $self->new_elem($have);
 
+  # overwrite existing!
   } else {
     $self->update_elem($lkup,$have);
 
@@ -611,13 +614,8 @@ sub free($self,$path) {
   # a special value in the path ;>
   $lkup->{path}=$self->freeblk;
 
-
-  # zero-flood content
-  #
-  # this is not strictly necessary,
-  # but it'll likely make the file
-  # compress better
-
+  # get length of identifier,
+  # then calculate length of padding
   my $ezy  = ($lkup->{ezy}+1) * $blk_sz;
   my $diff = (
 
@@ -628,11 +626,20 @@ sub free($self,$path) {
 
   );
 
+
+  # we zero-flood content
+  #
+  # this is not strictly necessary,
+  # but it'll likely make the file
+  # compress better
+
   my $fmat =
     $tab_t->{packof}
   . $cstr->{packof}
   . "x[$diff]";
 
+
+  # ^overwrite data
   $self->seek_this_elem($lkup);
 
   print {$self->{fh}} pack $fmat,
@@ -799,6 +806,208 @@ sub err($self,$me,%O) {
 };
 
 # ---   *   ---   *   ---
+# recalculate hash table size
+
+sub hash_step($self) {
+
+  my $step  = int_npow2 $self->{cnt},1;
+  my $limit = 1 << $step;
+
+  while($limit < $self->{cnt}) {
+    $step++;
+    $limit=1 << $step;
+
+  };
+
+
+  $self->{tab}->{step} = $step;
+  $self->{tab}->{size} = $limit;
+  $self->{tab}->{mask} = [map {
+    0x00
+
+  } 0..(int_urdiv $limit,64)-1];
+
+
+  return;
+
+};
+
+# ---   *   ---   *   ---
+# make hash key from path
+
+sub hash_path($self,$path) {
+
+
+  my ($step,$limit)=(
+    $self->{tab}->{step},
+    $self->{tab}->{size},
+
+  );
+
+
+  # align path to qword
+  my $have = length $path;
+
+  my $ezy  = int_align $have,8;
+  my $diff = $ezy-$have;
+
+  $path .= "\x{00}" x $diff;
+
+
+  # qword mash!
+  my $x=0x00;
+
+  map {
+
+    my $i    = 0;
+    my $word = 0x00;
+
+    map {
+
+      $word |=
+         (ord $ARG)
+      << ($i++ * 8);
+
+    } reverse split null,$ARG;
+
+    $x ^= $word;
+
+  } grep {
+    length $ARG
+
+  } split qr[(.{8})],$path;
+
+
+  # iterative clamp
+  my $mask   = $limit-1;
+  my $upmask = ~$mask;
+
+  while($x > $mask) {
+
+    my $y=$x;
+
+    $x  &= $mask;
+    $y  &= $upmask;
+
+    $y >>= $step;
+    $x  ^= $y;
+
+  };
+
+
+  return $x;
+
+};
+
+# ---   *   ---   *   ---
+# get [idex => bit] of hash mask
+
+sub get_hash_mask($self,$x) {
+
+  my $idex = (int_urdiv $x,64)-1;
+  my $bit  = 1 << ($x & 63);
+
+  return ($idex,$bit);
+
+};
+
+# ---   *   ---   *   ---
+# build hash table for archive
+
+sub rehash($self) {
+
+
+  # ~
+  $self->rewind();
+  $self->hash_step();
+
+  my $walked = [];
+  my $col    = 0;
+  my $fsolve = 0;
+
+  my ($step,$limit,$mask)=(
+    $self->{tab}->{step},
+    $self->{tab}->{size}-1,
+    $self->{tab}->{mask},
+
+  );
+
+
+  # walk file and discard unwanted
+  while(defined (
+    my $elem=$self->read_elem()
+
+  )) {
+
+
+    # get key for path
+    my $x=$self->hash_path($elem->{path});
+
+    my ($idex,$bit)=
+      $self->get_hash_mask($x);
+
+    my $start=$idex;
+    my $coled=0;
+
+
+    # slot occupied?
+    retry:
+    my $bmask=\$mask->[$idex];
+
+    if($$bmask & $bit) {
+
+      $coled |= 1;
+
+      my $nbmask = ~($$bmask);
+      my $have   = bitscanf $nbmask;
+
+      $have=bitscanr $nbmask
+      if ! defined $have;
+
+      $bit=1 << ($have-1)
+      if defined $have;
+
+
+      if(! defined $have
+      || ($bit & $$bmask)) {
+
+        $idex++;
+        $idex=0 if $idex >= int @$mask;
+
+        goto retry if $idex != $start;
+
+
+      } else {
+        $bit=1 << $have;
+        $fsolve++;
+
+      };
+
+
+    } elsif($coled) {
+      $fsolve++;
+
+    };
+
+
+    $col += $coled;
+
+
+    $$bmask |= $bit;
+    last if ! $self->seek_next_elem($elem);
+
+  };
+
+say "$col/$self->{cnt} collisions";
+say "$fsolve/$col solved";
+
+say "limit $limit";
+
+  return;
+
+};
+
+# ---   *   ---   *   ---
 # the bit
 
 use Arstd::xd;
@@ -806,16 +1015,26 @@ use Arstd::xd;
 my $pkg  = St::cpkg;
 my $daf  = $pkg->fnew('./testy');
 
+use Shb7;
+
+my $tree = Shb7::walk(glob '~');
+my @fake = map {
+  $ARG->{value}
+
+} $tree->get_file_list(full_path=>0);
+
 map {
-  $daf->store("x$ARG",'word',[(0x2420|$ARG) x 8])
 
-} 0..2;
+  $daf->store(
+    "$fake[$ARG]",
+    'word',[(0x2420|$ARG) x 8]
 
-$daf->free('x1');
-$daf->free('x2');
-$daf->store('x3','word',[(0x2424) x 8]);
+  )
 
-$daf->defrag();
+} 0..$#fake;
+
+#$daf->defrag();
+$daf->rehash();
 $daf->fclose();
 
 # TODO
