@@ -44,7 +44,7 @@ package daf;
 # ---   *   ---   *   ---
 # info
 
-  our $VERSION = v0.00.8;#a
+  our $VERSION = v0.00.9;#a
   our $AUTHOR  = 'IBN-3DILA';
 
 # ---   *   ---   *   ---
@@ -102,7 +102,8 @@ St::vconst {
 
   },
 
-  dumpstep   => 0x1000,
+  dumpstep    => 0x1000,
+  hash_loc_sz => (typefet 'word'),
 
 };
 
@@ -140,8 +141,9 @@ sub new($class,$path,%O) {
     fh     => undef,
     tab    => {mask=>[],size=>0,step=>0},
 
-    cache  => {},
     blk_sz => $O{blk_sz},
+
+    update => {rehash=>0,defrag=>0},
 
   },$class;
 
@@ -240,6 +242,13 @@ sub fclose($self) {
   # get ctx
   my $fh  = $self->{fh};
   my $dst = $self->{path} . $self->ext;
+
+  # handle updates
+  $self->defrag
+  if $self->{update}->{defrag};
+
+  $self->full_rehash
+  if $self->{update}->{rehash};
 
 
   # rewind to header
@@ -374,16 +383,18 @@ sub fetch($self,$pathref) {
 
   # get ctx
   my $blk_sz = $self->{blk_sz};
+  my $cnt    = $self->{cnt};
+
+  my $i      = 0;
   my $out    = undef;
 
   $self->rewind();
 
 
   # walk table
-  while(defined (
-    my $elem=$self->read_elem()
+  while($i++ < $cnt) {
 
-  )) {
+    my $elem=$self->read_elem();
 
 
     # found requested?
@@ -395,7 +406,7 @@ sub fetch($self,$pathref) {
 
 
     # ^nope, go next
-    last if ! $self->seek_next_elem($elem);
+    $self->seek_next_elem($elem);
 
   };
 
@@ -464,11 +475,13 @@ sub pack_data($self,$type,$data,$pathref) {
 
 sub new_elem($self,$data) {
 
-  seek  $self->{fh},0,2;
+  $self->seek_hash();
   print {$self->{fh}} ${$data->{bytes}};
 
   $self->{cnt}++;
   $self->{blkcnt} += $data->{ezy};
+
+  $self->{update}->{rehash} |= 1;
 
   return;
 
@@ -510,6 +523,32 @@ sub dump_elem($self,$dst,$lkup) {
     print {$dst} $chunk;
 
     $total -= $step;
+
+  };
+
+
+  return;
+
+};
+
+# ---   *   ---   *   ---
+# chunked flood-fill N bytes
+
+sub flood($self,$data,$size) {
+
+
+  # get ctx
+  my $step = $self->dumpstep;
+
+
+  # write content in chunks until end
+  $data=pack 'Q',$data;
+
+  while($size) {
+    $step=$size if $step > $size;
+    print {$self->{fh}} $data x $step;
+
+    $size -= $step;
 
   };
 
@@ -647,6 +686,9 @@ sub free($self,$path) {
     $freeblk;
 
 
+  $self->{update}->{defrag} |= 1;
+  $self->{update}->{rehash} |= 1;
+
   return 1;
 
 };
@@ -662,6 +704,10 @@ sub alloc($self,$pathref,$ezy) {
 
   # get ctx
   my $freeblk = $self->freeblk;
+
+  my $cnt     = $self->{cnt};
+  my $i       = 0;
+
   $self->rewind();
 
 
@@ -670,11 +716,9 @@ sub alloc($self,$pathref,$ezy) {
   my $avail = undef;
   my $out   = undef;
 
+  while($i++ < $cnt) {
 
-  while(defined (
-    my $elem=$self->read_elem()
-
-  )) {
+    my $elem=$self->read_elem();
 
 
     # found requested?
@@ -705,7 +749,7 @@ sub alloc($self,$pathref,$ezy) {
 
 
     # ^nope, go next
-    last if ! $self->seek_next_elem($elem);
+    $self->seek_next_elem($elem);
 
   };
 
@@ -726,6 +770,9 @@ sub defrag($self) {
   my $head_t  = $self->head_t;
   my $tmp     = $self->ftmp(1);
 
+  my $cnt     = $self->{cnt};
+  my $i       = 0;
+
 
   # open tmp file
   open my $dst,'+>',$tmp
@@ -745,12 +792,12 @@ sub defrag($self) {
 
 
   # walk file and discard unwanted
-  while(defined (
-    my $elem=$self->read_elem()
+  while($i++ < $cnt) {
 
-  )) {
+    my $elem=$self->read_elem();
 
 
+    # non free block?
     if($elem->{path} ne $freeblk) {
 
       $self->dump_elem($dst,$elem);
@@ -760,7 +807,7 @@ sub defrag($self) {
 
     };
 
-    last if ! $self->seek_next_elem($elem);
+    $self->seek_next_elem($elem);
 
   };
 
@@ -782,24 +829,8 @@ sub defrag($self) {
 
   $self->{fh}=$dst;
 
-  return;
-
-};
-
-# ---   *   ---   *   ---
-# dbout
-
-sub err($self,$me,%O) {
-
-  $WLog   //= $WLog->genesis;
-  $O{lvl} //= $AR_FATAL;
-
-  my $class=(length ref $self)
-    ? ref $self
-    : $self
-    ;
-
-  $WLog->err($me,%O,from=>$class);
+  $self->{update}->{defrag} &= 0;
+  $self->{update}->{rehash} |= 1;
 
   return;
 
@@ -822,10 +853,64 @@ sub hash_step($self) {
 
   $self->{tab}->{step} = $step;
   $self->{tab}->{size} = $limit;
-  $self->{tab}->{mask} = [map {
-    0x00
 
-  } 0..(int_urdiv $limit,64)-1];
+
+  return;
+
+};
+
+# ---   *   ---   *   ---
+# remove previous table
+
+sub hash_clear($self) {
+
+
+  # get ctx
+  my $type=$self->hash_loc_sz;
+
+
+  # get new size
+  $self->hash_step();
+  my $size=$self->{tab}->{size};
+
+
+  # jump to table and zero-flood
+  $self->seek_hash();
+  $self->flood(0x00,$size * $type->{sizeof});
+
+  # ^remove tail
+  my $eof=tell $self->{fh};
+  truncate $self->{fh},$eof;
+
+
+  # remove previous mask
+  $self->hash_reset_mask();
+
+  return;
+
+};
+
+# ---   *   ---   *   ---
+# ^reset table avail masks
+
+sub hash_reset_mask($self) {
+
+
+  # get ctx
+  my $size=$self->{tab}->{size};
+
+
+  # build blank array
+  my @ar=(
+    map {0x00}
+    0..(int_urdiv $size,64)-1
+
+  );
+
+
+  # ^make two copies
+  $self->{tab}->{fetch_mask} = [@ar];
+  $self->{tab}->{avail_mask} = [@ar];
 
 
   return;
@@ -838,6 +923,7 @@ sub hash_step($self) {
 sub hash_path($self,$path) {
 
 
+  # get ctx
   my ($step,$limit)=(
     $self->{tab}->{step},
     $self->{tab}->{size},
@@ -854,7 +940,7 @@ sub hash_path($self,$path) {
   $path .= "\x{00}" x $diff;
 
 
-  # qword mash!
+  # qword xmas!
   my $x=0x00;
 
   map {
@@ -900,7 +986,7 @@ sub hash_path($self,$path) {
 };
 
 # ---   *   ---   *   ---
-# get [idex => bit] of hash mask
+# get [idex => bit] of hash key
 
 sub get_hash_mask($self,$x) {
 
@@ -912,96 +998,278 @@ sub get_hash_mask($self,$x) {
 };
 
 # ---   *   ---   *   ---
-# build hash table for archive
+# put ptr to element in table
 
-sub rehash($self) {
+sub rehash($self,$elem) {
 
 
-  # ~
+  # get ctx
+  my $skip  = $self->head_t->{sizeof};
+  my $fmask = $self->{tab}->{fetch_mask};
+  my $amask = $self->{tab}->{avail_mask};
+
+  my $loc = $elem->{base}-$skip;
+     $loc = int_urdiv $loc,$self->{blk_sz};
+
+
+  # get free slot for element
+  my ($idex,$bit)=
+    hash_get_free($self,$elem,$fmask);
+
+  # ^validate
+  croak "unhashable '$elem->{path}'"
+  if ! defined $idex;
+
+
+  # jump to table entry
+  my $old   = tell $self->{fh};
+  my $coord = $bit+($idex*64);
+
+  $self->seek_hash($coord);
+
+  # overwrite loc
+  my $type  = $self->hash_loc_sz;
+  my $bytes = pack $type->{packof},$loc-1;
+
+  print {$self->{fh}} $bytes;
+
+
+  # mark occupied
+  $fmask->[$idex] |= $bit;
+  $amask->[$idex] |= $bit;
+
+  # jump back and give
+  seek $self->{fh},$old,0;
+
+  return;
+
+};
+
+# ---   *   ---   *   ---
+# ^entire table
+
+sub full_rehash($self) {
+
+
+  # get ctx
+  my $cnt = $self->{cnt};
+  my $i   = 0;
+
+
+  # reset
+  $self->hash_clear();
   $self->rewind();
-  $self->hash_step();
-
-  my $walked = [];
-  my $col    = 0;
-  my $fsolve = 0;
-
-  my ($step,$limit,$mask)=(
-    $self->{tab}->{step},
-    $self->{tab}->{size}-1,
-    $self->{tab}->{mask},
-
-  );
 
 
-  # walk file and discard unwanted
-  while(defined (
-    my $elem=$self->read_elem()
+  # walk file
+  while($i++ < $cnt) {
 
-  )) {
-
-
-    # get key for path
-    my $x=$self->hash_path($elem->{path});
-
-    my ($idex,$bit)=
-      $self->get_hash_mask($x);
-
-    my $start=$idex;
-    my $coled=0;
+    my $elem=$self->read_elem();
 
 
-    # slot occupied?
-    retry:
-    my $bmask=\$mask->[$idex];
-
-    if($$bmask & $bit) {
-
-      $coled |= 1;
-
-      my $nbmask = ~($$bmask);
-      my $have   = bitscanf $nbmask;
-
-      $have=bitscanr $nbmask
-      if ! defined $have;
-
-      $bit=1 << ($have-1)
-      if defined $have;
-
-
-      if(! defined $have
-      || ($bit & $$bmask)) {
-
-        $idex++;
-        $idex=0 if $idex >= int @$mask;
-
-        goto retry if $idex != $start;
-
-
-      } else {
-        $bit=1 << $have;
-        $fsolve++;
-
-      };
-
-
-    } elsif($coled) {
-      $fsolve++;
-
-    };
-
-
-    $col += $coled;
-
-
-    $$bmask |= $bit;
+    # insert all elements!
+    $self->rehash($elem);
     last if ! $self->seek_next_elem($elem);
 
   };
 
-say "$col/$self->{cnt} collisions";
-say "$fsolve/$col solved";
 
-say "limit $limit";
+  $self->{update}->{rehash} &= 0;
+  return;
+
+};
+
+# ---   *   ---   *   ---
+# find coords of next free slot
+
+sub hash_get_free($self,$elem,$mask) {
+
+
+  # get key for path
+  my $x=$self->hash_path($elem->{path});
+
+  # ^check for collision
+  my ($idex,$bit)=
+    $self->get_hash_mask($x);
+
+  my $start=$idex;
+
+
+  # slot occupied?
+  retry:
+
+  my $bmask=\$mask->[$idex];
+  if($$bmask & $bit) {
+
+
+    # find next zero bit to the right
+    my $nbmask = ~($$bmask);
+    my $have   = bitscanf $nbmask;
+
+    # ^to the left on fail!
+    $have=bitscanr $nbmask
+    if ! defined $have;
+
+    $bit=1 << ($have-1)
+    if defined $have;
+
+
+    # neither side is free?
+    if(! defined $have
+    || ($bit & $$bmask)) {
+
+
+      # try rellocating
+      $idex++;
+      $idex=0 if $idex >= int @$mask;
+
+      # ^fail if array is full!
+      goto retry if $idex != $start;
+      return undef;
+
+
+    # found avail, stop
+    } else {
+      $bit=1 << $have;
+
+    };
+
+
+  };
+
+
+  return ($idex,$bit);
+
+};
+
+# ---   *   ---   *   ---
+# ^read loc stored at path
+
+sub hash_get_occu($self,$pathref,$mask) {
+
+
+  # get key for path
+  my $x=$self->hash_path($$pathref);
+
+  # ^check for collision
+  my ($idex,$bit)=
+    $self->get_hash_mask($x);
+
+  my $start=$idex;
+
+
+  # have correct slot?
+  retry:
+
+  my $bmask = \$mask->[$idex];
+  my $coord = $bit+($idex*64);
+
+  if($$bmask & $bit) {
+
+    my $elem=$self->hash_hit($pathref,$coord);
+
+
+    # slot doesn't match data?
+    if(! defined $elem) {
+
+      # try rellocating
+      $idex++;
+      $idex=0 if $idex >= int @$mask;
+
+      # ^fail if array is full!
+      goto retry if $idex != $start;
+      return null;
+
+
+    # ^fetched, stop
+    } else {
+      return $elem;
+
+    };
+
+  };
+
+
+  return null;
+
+};
+
+# ---   *   ---   *   ---
+# seek to hash table entry
+
+sub seek_hash($self,$coord=0x00) {
+
+  # get ctx
+  my $type   = $self->hash_loc_sz;
+  my $skip   = $self->head_t->{sizeof};
+
+  my $blk_sz = $self->{blk_sz};
+  my $break  = $self->{blkcnt} * $blk_sz;
+
+  # jump to begging of table
+  $break=$break+($coord * $type->{sizeof});
+  return seek $self->{fh},$skip+$break,0;
+
+};
+
+# ---   *   ---   *   ---
+# ensure hash key matches data
+
+sub hash_hit($self,$pathref,$coord) {
+
+
+  # get ctx
+  my $type   = $self->hash_loc_sz;
+  my $skip   = $self->head_t->{sizeof};
+
+  my $blk_sz = $self->{blk_sz};
+
+
+  # jump to begging of table
+  my $old=tell $self->{fh};
+  $self->seek_hash($coord);
+
+  # get location of element
+  my $loc=0x00;
+  read $self->{fh},$loc,$type->{sizeof};
+
+  $loc = unpack $type->{packof},$loc;
+  $loc = ($loc+1) * $blk_sz;
+
+
+  # jump to location and read elem
+  seek $self->{fh},$skip+$loc,0;
+  my $elem=$self->read_elem();
+
+  # ^validate
+  croak "bad hash: '$$pathref'"
+  if ! defined $elem;
+
+
+  # restore position!
+  seek $self->{fh},$old,0;
+
+  # check elem path against lookup
+  # give elem if valid!
+  return ($$pathref eq $elem->{path})
+    ? $elem : null ;
+
+};
+
+# ---   *   ---   *   ---
+# dbout
+
+sub err($self,$me,%O) {
+
+  $WLog   //= $WLog->genesis;
+  $O{lvl} //= $AR_FATAL;
+
+  my $class=(length ref $self)
+    ? ref $self
+    : $self
+    ;
+
+  $WLog->err($me,%O,from=>$class);
 
   return;
 
@@ -1015,13 +1283,15 @@ use Arstd::xd;
 my $pkg  = St::cpkg;
 my $daf  = $pkg->fnew('./testy');
 
-use Shb7;
+#use Shb7;
+#
+#my $tree = Shb7::walk(glob '~');
+#my @fake = map {
+#  $ARG->{value}
+#
+#} $tree->get_file_list(full_path=>0);
 
-my $tree = Shb7::walk(glob '~');
-my @fake = map {
-  $ARG->{value}
-
-} $tree->get_file_list(full_path=>0);
+my @fake=qw(x0 x1 x2);
 
 map {
 
@@ -1033,8 +1303,18 @@ map {
 
 } 0..$#fake;
 
-#$daf->defrag();
-$daf->rehash();
+
+$daf->defrag();
+$daf->full_rehash();
+
+my $elem=$daf->hash_get_occu(
+  \'x2',$daf->{tab}->{fetch_mask}
+
+);
+
+use Fmat;
+fatdump \$elem;
+
 $daf->fclose();
 
 # TODO
