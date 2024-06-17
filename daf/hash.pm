@@ -36,7 +36,7 @@ package daf::hash;
 # ---   *   ---   *   ---
 # info
 
-  our $VERSION = v0.00.1;#a
+  our $VERSION = v0.00.2;#a
   our $AUTHOR  = 'IBN-3DILA';
 
 # ---   *   ---   *   ---
@@ -103,9 +103,15 @@ sub recalc_step($self,$cnt) {
   };
 
 
+  # calc mask array size
+  my $mask_sz=(int_urdiv $limit,64);
+
+
   # save results and give
   $self->{step} = $step;
   $self->{size} = $limit;
+
+  $self->{mask_size} = $mask_sz;
 
   return;
 
@@ -142,18 +148,11 @@ sub clear($self,$cnt) {
 
 sub reset_mask($self) {
 
-
   # get ctx
-  my $size=$self->{size};
-
+  my $size=$self->{mask_size};
 
   # build blank array
-  my @ar=(
-    map {0x00}
-    0..(int_urdiv $size,64)-1
-
-  );
-
+  my @ar=map {0x00} 0..$size-1;
 
   # ^make two copies
   $self->{fetch_mask} = [@ar];
@@ -294,8 +293,11 @@ sub rehash($self,$elem) {
 
 
   # overwrite cached value
-  my $coord=$bit+($idex*64);
+  my $have  = bitscanf $bit;
+  my $coord = $have+($idex*64);
+
   $self->{fetch}->[$coord]=$loc;
+
 
   # mark occupied
   $fmask->[$idex] |= $bit;
@@ -379,7 +381,10 @@ sub get_free($self,$x,$pathref=undef) {
   # on match, simply return these coords!
 
   if(defined $pathref && ($smask & $bit)) {
-    my $coord = $bit + ($idex * 64);
+
+    my $have  = bitscanf $bit;
+
+    my $coord = $have + ($idex * 64);
     my $elem  = $self->hit($pathref,$coord);
 
     return ($idex,$bit)
@@ -456,7 +461,9 @@ sub get_occu($self,$pathref) {
   retry:
 
   my $bmask = \$mask->[$idex];
-  my $coord = $bit+($idex*64);
+  my $have  = bitscanf $bit;
+
+  my $coord = $have+($idex*64);
 
   if($$bmask & $bit) {
 
@@ -487,10 +494,12 @@ sub get_occu($self,$pathref) {
         $idex=0 if $idex >= int @$mask;
 
         # ^fail if array is full!
-        goto retry if $idex != $start;
-        return null;
+        return null if $idex == $start;
 
       };
+
+
+      goto retry;
 
 
     # ^fetched, stop
@@ -609,28 +618,46 @@ sub load($self) {
 
 
   # get ctx
-  my $main = $self->{main};
-  my $type = $self->loc_sz;
-  my $cnt  = $main->{cnt};
+  my $main  = $self->{main};
+  my $type  = $self->loc_sz;
+  my $cnt   = $main->{cnt};
+
+  my $chunk = null;
+  my $have  = null;
+
+  $self->recalc_step($cnt);
+
 
   # jump to begging of table
   my $old=tell $main->{fh};
   $self->seek_elem(0);
 
 
-  # read N entries
-  my $chunk=null;
-
+  # read fetch mask
   read $main->{fh},$chunk,
-    $type->{sizeof} * $cnt;
+    8 * $self->{mask_size};
 
   # ^unpack
-  my $have=bunpack $type,\$chunk,0,$cnt;
+  $have=bunpack qword=>\$chunk,0,
+    $self->{mask_size};
+
+  $self->{fetch_mask}=$have->{ct};
+
+
+  # read N entries
+  read $main->{fh},$chunk,
+    $type->{sizeof} * $self->{size};
+
+  # ^unpack
+  $have=bunpack $type,\$chunk,0,
+    $self->{size};
+
   $self->{fetch}=$have->{ct};
 
 
   # restore position and give
   seek $main->{fh},$old,0;
+  $main->{update}->{rehash} &= 0;
 
   return;
 
@@ -643,9 +670,12 @@ sub load($self) {
 sub save($self) {
 
   # get ctx
-  my $main = $self->{main};
-  my $type = $self->loc_sz;
-  my $cnt  = $main->{cnt};
+  my $main  = $self->{main};
+  my $type  = $self->loc_sz;
+  my $cnt   = $main->{cnt};
+
+  my $chunk = null;
+
 
   # jump to begging of table
   my $old=tell $main->{fh};
@@ -656,9 +686,13 @@ sub save($self) {
   truncate $main->{fh},$eof;
 
 
-  # now pack n dump the table
-  my $chunk=bpack $type,map {
-    (defined $ARG) ? $ARG : 0x00
+  # pack n dump mask array
+  $chunk=bpack qword=>@{$self->{fetch_mask}};
+  print {$main->{fh}} $chunk->{ct};
+
+  # pack n dump entries
+  $chunk=bpack $type,map {
+    (defined $ARG) ? $ARG : 0x0000
 
   } @{$self->{fetch}};
 

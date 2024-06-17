@@ -242,6 +242,9 @@ sub fopen($class,$path,%O) {
     1 << ($have->{blk_sz}+4);
 
 
+  # read hash table to memory
+  $self->{tab}->load();
+
   return $self;
 
 };
@@ -834,36 +837,32 @@ sub err($self,$me,%O) {
 use Arstd::xd;
 
 my $pkg  = St::cpkg;
-my $daf  = $pkg->fnew('./testy');
+my $daf  = $pkg->fopen('./testy');
 
-#use Shb7;
+use Fmat;
+fatdump \$daf->{tab},blessed=>1;
+
+my $have=$daf->{tab}->get_occu(\'x1');
+fatdump \$have;
+
+close $daf->{fh};
+
+#my @fake=qw(x0 x1 x2);
 #
-#my $tree = Shb7::walk(glob '~');
-#my @fake = map {
-#  $ARG->{value}
+#map {
 #
-#} $tree->get_file_list(full_path=>0);
-
-my @fake=qw(x0 x1 x2);
-
-map {
-
-  $daf->store(
-    "$fake[$ARG]",
-    'word',[(0x2420|$ARG) x 8]
-
-  )
-
-} 0..$#fake;
-
-
-#$daf->defrag();
-#$daf->{tab}->full_rehash();
-
-$daf->free('x1');
-$daf->store(x1=>word=>[(0x2424) x 8]);
-
-$daf->fclose();
+#  $daf->store(
+#    "$fake[$ARG]",
+#    'word',[(0x2420|$ARG) x 8]
+#
+#  )
+#
+#} 0..$#fake;
+#
+#$daf->free('x1');
+#$daf->store(x1=>word=>[(0x2424) x 8]);
+#
+#$daf->fclose();
 
 # TODO
 #
