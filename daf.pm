@@ -45,7 +45,7 @@ package daf;
 # ---   *   ---   *   ---
 # info
 
-  our $VERSION = v0.00.9;#a
+  our $VERSION = v0.01.0;#b
   our $AUTHOR  = 'IBN-3DILA';
 
 # ---   *   ---   *   ---
@@ -145,7 +145,7 @@ sub new($class,$path,%O) {
 
     blk_sz => $O{blk_sz},
 
-    update => {rehash=>0,defrag=>0},
+    update => {rehash=>0,defrag=>0,header=>0},
 
   },$class;
 
@@ -158,6 +158,8 @@ sub new($class,$path,%O) {
 
     $self->{blk_sz}=
       1 << ($self->{blk_sz}+4);
+
+    $self->{update}->{header}=1;
 
   };
 
@@ -213,7 +215,7 @@ sub fopen($class,$path,%O) {
 
 
   # get ice
-  my $self=$class->new($path,%O);
+  my $self=$class->new($path,%O,open=>1);
 
   # get content
   open $self->{fh},'+<',
@@ -256,36 +258,51 @@ sub fclose($self) {
 
 
   # handle updates
-  $self->defrag
-  if $self->{update}->{defrag};
+  my $pending=$self->{update};
 
-  $self->{tab}->full_rehash
-  if $self->{update}->{rehash};
+  # remove blanks?
+  if($pending->{defrag}) {
+    $self->defrag();
+    $pending->{header} |= 1;
 
-  $self->{tab}->save();
+  };
 
 
-  # get ctx
-  my $fh  = $self->{fh};
-  my $dst = $self->{path} . $self->ext;
+  # rebuild hash table?
+  if($pending->{rehash}) {
+    $self->{tab}->full_rehash();
+    $self->{tab}->save();
 
-  # rewind to header
-  seek $fh,0,0;
-  my $head_t=$self->head_t;
+  };
 
-  # ^put data
-  print {$fh} (pack $head_t->{packof},
 
-    $self->sig,
-    $self->{blk_sz_src},
-    $self->{cnt},
-    $self->{blkcnt},
+  # rewrite header?
+  if($pending->{header}) {
 
-  );
+
+    # get ctx
+    my $fh  = $self->{fh};
+    my $dst = $self->{path} . $self->ext;
+
+    # rewind to header
+    seek $fh,0,0;
+    my $head_t=$self->head_t;
+
+    # ^put data
+    print {$fh} (pack $head_t->{packof},
+
+      $self->sig,
+      $self->{blk_sz_src},
+      $self->{cnt},
+      $self->{blkcnt},
+
+    );
+
+  };
 
 
   # close file and give
-  close $fh;
+  close $self->{fh};
   return;
 
 };
@@ -352,6 +369,58 @@ sub read_elem($self) {
 };
 
 # ---   *   ---   *   ---
+# given an element descriptor,
+# read it's contents into a string
+
+sub read_data($self,$elem) {
+
+
+  # input is path?
+  if(! is_hashref $elem) {
+
+    my $path=(! length ref $elem)
+      ? \$elem : $elem ;
+
+    $elem=$self->fetch($path)
+
+  };
+
+
+  # get ctx
+  my $fh     = $self->{fh};
+  my $blk_sz = $self->{blk_sz};
+
+
+  # get size of data!
+  my $skip   = $elem->{loc}-$elem->{base};
+
+  my $total  = ($elem->{ezy}+1) * $blk_sz;
+     $total -= $skip;
+
+
+  # seek to data and read chunks
+  seek $fh,$elem->{loc},0;
+
+  my $step   = $self->dumpstep;
+  my $out    = null;
+  my $chunk  = null;
+
+  while($total) {
+
+    $step=$total if $total < $step;
+
+    read $fh,$chunk,$step;
+    $out .= $chunk;
+
+    $total -= $step;
+
+  };
+
+  return $out;
+
+};
+
+# ---   *   ---   *   ---
 # seek to begging of file,
 # skipping header
 
@@ -406,7 +475,7 @@ sub fetch($self,$pathref) {
   my $cnt    = $self->{cnt};
 
   my $i      = 0;
-  my $out    = undef;
+  my $out    = null;
 
   $self->rewind();
 
@@ -731,6 +800,7 @@ sub free($self,$path) {
   $self->{update}->{defrag} |= 1;
   $self->{update}->{rehash} |= 1;
 
+
   return 1;
 
 };
@@ -832,41 +902,62 @@ sub err($self,$me,%O) {
 };
 
 # ---   *   ---   *   ---
-# the bit
+# test A
 
 use Arstd::xd;
-
-my $pkg  = St::cpkg;
-my $daf  = $pkg->fopen('./testy');
-
 use Fmat;
-fatdump \$daf->{tab},blessed=>1;
 
-my $have=$daf->{tab}->get_occu(\'x1');
-fatdump \$have;
+sub test_fnew($class,$fname) {
 
-close $daf->{fh};
+  my $daf  = $class->fnew($fname);
+  my @fake = qw(x0 x1 x2);
 
-#my @fake=qw(x0 x1 x2);
-#
-#map {
-#
-#  $daf->store(
-#    "$fake[$ARG]",
-#    'word',[(0x2420|$ARG) x 8]
-#
-#  )
-#
-#} 0..$#fake;
-#
-#$daf->free('x1');
-#$daf->store(x1=>word=>[(0x2424) x 8]);
-#
-#$daf->fclose();
+  map {
 
-# TODO
+    $daf->store(
+      "$fake[$ARG]",
+      'word',[(0x2420|$ARG) x 8]
+
+    )
+
+  } 0..$#fake;
+
+  $daf->fclose();
+  return;
+
+};
+
+# ---   *   ---   *   ---
+# test B
+
+sub test_fopen($class,$fname) {
+
+  my $daf=$class->fopen($fname);
+
+  $daf->store(x1=>word=>[(0x2424) x 16]);
+
+  my $have=$daf->fetch(\'x1');
+  fatdump \$have;
+  fatdump \$daf->{update};
+
+  $have=$daf->read_data('x1');
+  xd $have,head=>0;
+  say length $have;
+
+  $daf->fclose();
+  return;
+
+};
+
+# ---   *   ---   *   ---
+# the bit
+
+#my $pkg   = St::cpkg;
+#my $fname = './testy';
 #
-# * subdirs
+#$pkg->test_fnew($fname);
+#$pkg->test_fopen($fname);
+
 
 # ---   *   ---   *   ---
 1; # ret

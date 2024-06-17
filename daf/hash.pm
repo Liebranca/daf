@@ -36,7 +36,7 @@ package daf::hash;
 # ---   *   ---   *   ---
 # info
 
-  our $VERSION = v0.00.2;#a
+  our $VERSION = v0.00.3;#a
   our $AUTHOR  = 'IBN-3DILA';
 
 # ---   *   ---   *   ---
@@ -577,7 +577,9 @@ sub free($self,$elem) {
   my ($idex,$bit)=
     @{$elem->{hash_coord}};
 
-  my $coord = $bit + ($idex * 64);
+  my $have  = bitscanf $bit;
+
+  my $coord = $have + ($idex * 64);
   my $ezy   = $elem->{ezy};
 
 
@@ -586,7 +588,7 @@ sub free($self,$elem) {
   push @$dst,$elem->{base};
 
   # ^mark block as free!
-  $self->{avail_mask} &= ~$bit;
+  $self->{avail_mask}->[$idex] &= ~$bit;
 
   return;
 
