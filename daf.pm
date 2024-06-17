@@ -34,12 +34,13 @@ package daf;
 
   use Arstd::Path;
   use Arstd::Int;
-  use Arstd::Bytes qw(bitscanf bitscanr);
   use Arstd::IO;
+  use Arstd::PM;
   use Arstd::WLog;
   use Arstd::xd;
 
   use parent 'St';
+  use lib "$ENV{ARPATH}/daf/";
 
 # ---   *   ---   *   ---
 # info
@@ -55,6 +56,7 @@ St::vconst {
 
   DEFAULT => {
     blk_sz  => 0,
+    tab_sz  => 64,
 
   },
 
@@ -62,10 +64,10 @@ St::vconst {
   ext    => '.daf',
   sig    => 0xF0DA,
 
-  tab_t  => sub {
+  blk_t  => sub {
 
     my $class=$_[0];
-    my $struc=struc "$class.tab_t" => q[
+    my $struc=struc "$class.blk_t" => q[
       word ezy;
 
     ];
@@ -74,6 +76,7 @@ St::vconst {
 
   },
 
+  hash_t => 'daf::hash',
   head_t => sub {
 
     my $class=$_[0];
@@ -103,7 +106,6 @@ St::vconst {
   },
 
   dumpstep    => 0x1000,
-  hash_loc_sz => (typefet 'word'),
 
 };
 
@@ -139,7 +141,7 @@ sub new($class,$path,%O) {
     blkcnt => 0,
 
     fh     => undef,
-    tab    => {mask=>[],size=>0,step=>0},
+    tab    => undef,
 
     blk_sz => $O{blk_sz},
 
@@ -158,6 +160,17 @@ sub new($class,$path,%O) {
       1 << ($self->{blk_sz}+4);
 
   };
+
+
+  # make hash table
+  my $hash_t=$class->hash_t;
+  cloadi $hash_t;
+
+  $self->{tab}=$hash_t->new(
+    main=>$self,
+    size=>$O{tab_sz},
+
+  );
 
 
   return $self;
@@ -239,17 +252,19 @@ sub fopen($class,$path,%O) {
 sub fclose($self) {
 
 
-  # get ctx
-  my $fh  = $self->{fh};
-  my $dst = $self->{path} . $self->ext;
-
   # handle updates
   $self->defrag
   if $self->{update}->{defrag};
 
-  $self->full_rehash
+  $self->{tab}->full_rehash
   if $self->{update}->{rehash};
 
+  $self->{tab}->save();
+
+
+  # get ctx
+  my $fh  = $self->{fh};
+  my $dst = $self->{path} . $self->ext;
 
   # rewind to header
   seek $fh,0,0;
@@ -282,7 +297,7 @@ sub read_elem($self) {
   # get ctx
   my $fh     = $self->{fh};
   my $blk_sz = $self->{blk_sz};
-  my $tab_t  = $self->tab_t;
+  my $blk_t  = $self->blk_t;
 
   my $loc    = tell $fh;
 
@@ -295,14 +310,14 @@ sub read_elem($self) {
 
 
   # get element size
-  my $elem=substr $chunk,0,$tab_t->{sizeof},null;
-     $elem=bunpack $tab_t,\$elem;
+  my $elem=substr $chunk,0,$blk_t->{sizeof},null;
+     $elem=bunpack $blk_t,\$elem;
 
   $elem         = $elem->{ct}->[0];
 
   $elem->{path} = null;
   $elem->{base} = $loc;
-  $elem->{loc}  = $loc + $tab_t->{sizeof} + 1;
+  $elem->{loc}  = $loc + $blk_t->{sizeof} + 1;
 
 
   # get element path
@@ -313,7 +328,7 @@ sub read_elem($self) {
 
   # done?
   return $elem
-  if $len < $blk_sz - $tab_t->{sizeof};
+  if $len < $blk_sz - $blk_t->{sizeof};
 
 
   # ^nope, read more blocks!
@@ -376,9 +391,11 @@ sub seek_next_elem($self,$from) {
 sub fetch($self,$pathref) {
 
 
-  # file in cache?
-  return $self->{cache}->{$$pathref}
-  if exists $self->{cache}->{$$pathref};
+  # elem in table?
+  my $tab  = $self->{tab};
+  my $elem = $tab->get_occu($pathref);
+
+  return $elem if length $elem;
 
 
   # get ctx
@@ -394,7 +411,7 @@ sub fetch($self,$pathref) {
   # walk table
   while($i++ < $cnt) {
 
-    my $elem=$self->read_elem();
+    $elem=$self->read_elem();
 
 
     # found requested?
@@ -423,7 +440,7 @@ sub pack_data($self,$type,$data,$pathref) {
 
   # get ctx
   my $blk_sz = $self->{blk_sz};
-  my $tab_t  = $self->tab_t;
+  my $blk_t  = $self->blk_t;
 
 
   # combine tab, path and data
@@ -437,14 +454,14 @@ sub pack_data($self,$type,$data,$pathref) {
 
 
   # get required/aligned size
-  my $req    = $tab_t->{sizeof}+length $have->{ct};
+  my $req    = $blk_t->{sizeof}+length $have->{ct};
   my $ezy    = int_urdiv $req,$blk_sz;
 
   my $total  = $ezy * $blk_sz;
 
   # ^record size!
-  my $tab = Bpack::layas $tab_t,$ezy-1;
-     $tab = bpack $tab_t => $tab;
+  my $tab = Bpack::layas $blk_t,$ezy-1;
+     $tab = bpack $blk_t => $tab;
 
   $have->{ct}=
     $tab->{ct}
@@ -475,15 +492,22 @@ sub pack_data($self,$type,$data,$pathref) {
 
 sub new_elem($self,$data) {
 
-  $self->seek_hash();
+  # jump to breakpoint
+  $self->{tab}->seek_elem(0);
+
+  my $out={
+    base => (tell $self->{fh}),
+
+  };
+
+
+  # write and up the block count
   print {$self->{fh}} ${$data->{bytes}};
 
   $self->{cnt}++;
   $self->{blkcnt} += $data->{ezy};
 
-  $self->{update}->{rehash} |= 1;
-
-  return;
+  return $out;
 
 };
 
@@ -607,13 +631,20 @@ sub store($self,$path,$type,$data) {
 
 
   # pack data and find where to put it ;>
+  my $tab  = $self->{tab};
+
   my $have = $self->pack_data($type,$data,\$path);
-  my $lkup = $self->alloc(\$path,$have->{ezy}-1);
+  my $lkup = $tab->alloc(\$path,$have->{ezy}-1);
 
 
   # making new entry?
-  if(! defined $lkup) {
-    $self->new_elem($have);
+  if(! length $lkup) {
+
+    $lkup=$self->new_elem($have);
+    $lkup->{path}=$path;
+
+    $tab->rehash($lkup);
+
 
   # overwrite existing!
   } else {
@@ -643,10 +674,18 @@ sub free($self,$path) {
 
   # get ctx
   my $blk_sz  = $self->{blk_sz};
-  my $tab_t   = $self->tab_t;
+  my $blk_t   = $self->blk_t;
 
   my $freeblk = $self->freeblk;
   my $cstr    = typefet 'cstr';
+
+
+  # mark slot as free for hashing
+  if(defined $lkup->{hash_coord}) {
+    my $tab=$self->{tab};
+    $tab->free($lkup);
+
+  };
 
 
   # we identify free entries by placing
@@ -661,7 +700,7 @@ sub free($self,$path) {
     $ezy-1
 
   - (length $freeblk)
-  - $tab_t->{sizeof}
+  - $blk_t->{sizeof}
 
   );
 
@@ -673,7 +712,7 @@ sub free($self,$path) {
   # compress better
 
   my $fmat =
-    $tab_t->{packof}
+    $blk_t->{packof}
   . $cstr->{packof}
   . "x[$diff]";
 
@@ -690,72 +729,6 @@ sub free($self,$path) {
   $self->{update}->{rehash} |= 1;
 
   return 1;
-
-};
-
-# ---   *   ---   *   ---
-# find block matching path and size
-#
-# if none found, look for
-# a free block matching size
-
-sub alloc($self,$pathref,$ezy) {
-
-
-  # get ctx
-  my $freeblk = $self->freeblk;
-
-  my $cnt     = $self->{cnt};
-  my $i       = 0;
-
-  $self->rewind();
-
-
-  # walk table
-  my $req   = undef;
-  my $avail = undef;
-  my $out   = undef;
-
-  while($i++ < $cnt) {
-
-    my $elem=$self->read_elem();
-
-
-    # found requested?
-    if($elem->{path} eq $$pathref) {
-
-      $req=$elem;
-
-      # stop if size matches ;>
-      $out=$req if $elem->{ezy} eq $ezy;
-
-
-    # ^found free block matching size?
-    } elsif(
-       $elem->{path} eq $freeblk
-    && $elem->{ezy}  eq $ezy
-
-    ) {
-
-      $avail=$elem;
-
-      # backup to this block if
-      # requested doesn't fit!
-      $out=$avail if defined $req;
-
-    };
-
-    last if defined $out;
-
-
-    # ^nope, go next
-    $self->seek_next_elem($elem);
-
-  };
-
-
-  $out //= $avail;
-  return $out;
 
 };
 
@@ -837,426 +810,6 @@ sub defrag($self) {
 };
 
 # ---   *   ---   *   ---
-# recalculate hash table size
-
-sub hash_step($self) {
-
-  my $step  = int_npow2 $self->{cnt},1;
-  my $limit = 1 << $step;
-
-  while($limit < $self->{cnt}) {
-    $step++;
-    $limit=1 << $step;
-
-  };
-
-
-  $self->{tab}->{step} = $step;
-  $self->{tab}->{size} = $limit;
-
-
-  return;
-
-};
-
-# ---   *   ---   *   ---
-# remove previous table
-
-sub hash_clear($self) {
-
-
-  # get ctx
-  my $type=$self->hash_loc_sz;
-
-
-  # get new size
-  $self->hash_step();
-  my $size=$self->{tab}->{size};
-
-
-  # jump to table and zero-flood
-  $self->seek_hash();
-  $self->flood(0x00,$size * $type->{sizeof});
-
-  # ^remove tail
-  my $eof=tell $self->{fh};
-  truncate $self->{fh},$eof;
-
-
-  # remove previous mask
-  $self->hash_reset_mask();
-
-  return;
-
-};
-
-# ---   *   ---   *   ---
-# ^reset table avail masks
-
-sub hash_reset_mask($self) {
-
-
-  # get ctx
-  my $size=$self->{tab}->{size};
-
-
-  # build blank array
-  my @ar=(
-    map {0x00}
-    0..(int_urdiv $size,64)-1
-
-  );
-
-
-  # ^make two copies
-  $self->{tab}->{fetch_mask} = [@ar];
-  $self->{tab}->{avail_mask} = [@ar];
-
-
-  return;
-
-};
-
-# ---   *   ---   *   ---
-# make hash key from path
-
-sub hash_path($self,$path) {
-
-
-  # get ctx
-  my ($step,$limit)=(
-    $self->{tab}->{step},
-    $self->{tab}->{size},
-
-  );
-
-
-  # align path to qword
-  my $have = length $path;
-
-  my $ezy  = int_align $have,8;
-  my $diff = $ezy-$have;
-
-  $path .= "\x{00}" x $diff;
-
-
-  # qword xmas!
-  my $x=0x00;
-
-  map {
-
-    my $i    = 0;
-    my $word = 0x00;
-
-    map {
-
-      $word |=
-         (ord $ARG)
-      << ($i++ * 8);
-
-    } reverse split null,$ARG;
-
-    $x ^= $word;
-
-  } grep {
-    length $ARG
-
-  } split qr[(.{8})],$path;
-
-
-  # iterative clamp
-  my $mask   = $limit-1;
-  my $upmask = ~$mask;
-
-  while($x > $mask) {
-
-    my $y=$x;
-
-    $x  &= $mask;
-    $y  &= $upmask;
-
-    $y >>= $step;
-    $x  ^= $y;
-
-  };
-
-
-  return $x;
-
-};
-
-# ---   *   ---   *   ---
-# get [idex => bit] of hash key
-
-sub get_hash_mask($self,$x) {
-
-  my $idex = (int_urdiv $x,64)-1;
-  my $bit  = 1 << ($x & 63);
-
-  return ($idex,$bit);
-
-};
-
-# ---   *   ---   *   ---
-# put ptr to element in table
-
-sub rehash($self,$elem) {
-
-
-  # get ctx
-  my $skip  = $self->head_t->{sizeof};
-  my $fmask = $self->{tab}->{fetch_mask};
-  my $amask = $self->{tab}->{avail_mask};
-
-  my $loc = $elem->{base}-$skip;
-     $loc = int_urdiv $loc,$self->{blk_sz};
-
-
-  # get free slot for element
-  my ($idex,$bit)=
-    hash_get_free($self,$elem,$fmask);
-
-  # ^validate
-  croak "unhashable '$elem->{path}'"
-  if ! defined $idex;
-
-
-  # jump to table entry
-  my $old   = tell $self->{fh};
-  my $coord = $bit+($idex*64);
-
-  $self->seek_hash($coord);
-
-  # overwrite loc
-  my $type  = $self->hash_loc_sz;
-  my $bytes = pack $type->{packof},$loc-1;
-
-  print {$self->{fh}} $bytes;
-
-
-  # mark occupied
-  $fmask->[$idex] |= $bit;
-  $amask->[$idex] |= $bit;
-
-  # jump back and give
-  seek $self->{fh},$old,0;
-
-  return;
-
-};
-
-# ---   *   ---   *   ---
-# ^entire table
-
-sub full_rehash($self) {
-
-
-  # get ctx
-  my $cnt = $self->{cnt};
-  my $i   = 0;
-
-
-  # reset
-  $self->hash_clear();
-  $self->rewind();
-
-
-  # walk file
-  while($i++ < $cnt) {
-
-    my $elem=$self->read_elem();
-
-
-    # insert all elements!
-    $self->rehash($elem);
-    last if ! $self->seek_next_elem($elem);
-
-  };
-
-
-  $self->{update}->{rehash} &= 0;
-  return;
-
-};
-
-# ---   *   ---   *   ---
-# find coords of next free slot
-
-sub hash_get_free($self,$elem,$mask) {
-
-
-  # get key for path
-  my $x=$self->hash_path($elem->{path});
-
-  # ^check for collision
-  my ($idex,$bit)=
-    $self->get_hash_mask($x);
-
-  my $start=$idex;
-
-
-  # slot occupied?
-  retry:
-
-  my $bmask=\$mask->[$idex];
-  if($$bmask & $bit) {
-
-
-    # find next zero bit to the right
-    my $nbmask = ~($$bmask);
-    my $have   = bitscanf $nbmask;
-
-    # ^to the left on fail!
-    $have=bitscanr $nbmask
-    if ! defined $have;
-
-    $bit=1 << ($have-1)
-    if defined $have;
-
-
-    # neither side is free?
-    if(! defined $have
-    || ($bit & $$bmask)) {
-
-
-      # try rellocating
-      $idex++;
-      $idex=0 if $idex >= int @$mask;
-
-      # ^fail if array is full!
-      goto retry if $idex != $start;
-      return undef;
-
-
-    # found avail, stop
-    } else {
-      $bit=1 << $have;
-
-    };
-
-
-  };
-
-
-  return ($idex,$bit);
-
-};
-
-# ---   *   ---   *   ---
-# ^read loc stored at path
-
-sub hash_get_occu($self,$pathref,$mask) {
-
-
-  # get key for path
-  my $x=$self->hash_path($$pathref);
-
-  # ^check for collision
-  my ($idex,$bit)=
-    $self->get_hash_mask($x);
-
-  my $start=$idex;
-
-
-  # have correct slot?
-  retry:
-
-  my $bmask = \$mask->[$idex];
-  my $coord = $bit+($idex*64);
-
-  if($$bmask & $bit) {
-
-    my $elem=$self->hash_hit($pathref,$coord);
-
-
-    # slot doesn't match data?
-    if(! defined $elem) {
-
-      # try rellocating
-      $idex++;
-      $idex=0 if $idex >= int @$mask;
-
-      # ^fail if array is full!
-      goto retry if $idex != $start;
-      return null;
-
-
-    # ^fetched, stop
-    } else {
-      return $elem;
-
-    };
-
-  };
-
-
-  return null;
-
-};
-
-# ---   *   ---   *   ---
-# seek to hash table entry
-
-sub seek_hash($self,$coord=0x00) {
-
-  # get ctx
-  my $type   = $self->hash_loc_sz;
-  my $skip   = $self->head_t->{sizeof};
-
-  my $blk_sz = $self->{blk_sz};
-  my $break  = $self->{blkcnt} * $blk_sz;
-
-  # jump to begging of table
-  $break=$break+($coord * $type->{sizeof});
-  return seek $self->{fh},$skip+$break,0;
-
-};
-
-# ---   *   ---   *   ---
-# ensure hash key matches data
-
-sub hash_hit($self,$pathref,$coord) {
-
-
-  # get ctx
-  my $type   = $self->hash_loc_sz;
-  my $skip   = $self->head_t->{sizeof};
-
-  my $blk_sz = $self->{blk_sz};
-
-
-  # jump to begging of table
-  my $old=tell $self->{fh};
-  $self->seek_hash($coord);
-
-  # get location of element
-  my $loc=0x00;
-  read $self->{fh},$loc,$type->{sizeof};
-
-  $loc = unpack $type->{packof},$loc;
-  $loc = ($loc+1) * $blk_sz;
-
-
-  # jump to location and read elem
-  seek $self->{fh},$skip+$loc,0;
-  my $elem=$self->read_elem();
-
-  # ^validate
-  croak "bad hash: '$$pathref'"
-  if ! defined $elem;
-
-
-  # restore position!
-  seek $self->{fh},$old,0;
-
-  # check elem path against lookup
-  # give elem if valid!
-  return ($$pathref eq $elem->{path})
-    ? $elem : null ;
-
-};
-
-# ---   *   ---   *   ---
 # dbout
 
 sub err($self,$me,%O) {
@@ -1304,16 +857,11 @@ map {
 } 0..$#fake;
 
 
-$daf->defrag();
-$daf->full_rehash();
+#$daf->defrag();
+#$daf->{tab}->full_rehash();
 
-my $elem=$daf->hash_get_occu(
-  \'x2',$daf->{tab}->{fetch_mask}
-
-);
-
-use Fmat;
-fatdump \$elem;
+$daf->free('x1');
+$daf->store(x1=>word=>[(0x2424) x 8]);
 
 $daf->fclose();
 
