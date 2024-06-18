@@ -45,7 +45,7 @@ package daf;
 # ---   *   ---   *   ---
 # info
 
-  our $VERSION = v0.01.1;#b
+  our $VERSION = v0.01.2;#b
   our $AUTHOR  = 'IBN-3DILA';
 
 # ---   *   ---   *   ---
@@ -544,7 +544,16 @@ sub pack_data($self,$type,$data,$pathref) {
 
   # combine tab, path and data
   my $path = bpack cstr=>$$pathref;
-  my $have = bpack $type,@$data;
+  my $have = (defined $data)
+    ? bpack $type,@$data
+    : {ct=>$type}
+    ;
+
+  $self->err(
+    'untyped, non-packed data '
+  . 'passed to store; need raw bytes!'
+
+  ) if ! defined $data && length ref $type;
 
 
   $have->{ct}=
@@ -726,7 +735,7 @@ sub cut($self,$ptr,$size) {
 # ---   *   ---   *   ---
 # pack, then update or make new
 
-sub store($self,$path,$type,$data) {
+sub store($self,$path,$type,$data=undef) {
 
 
   # force string ref
@@ -745,6 +754,7 @@ sub store($self,$path,$type,$data) {
 
     $lkup=$self->new_elem($have);
     $lkup->{path}=$$pathref;
+
 
     if($tab->{size} < $self->{cnt}) {
       $self->defrag();

@@ -278,6 +278,7 @@ sub rehash($self,$elem) {
 
   $loc-- if $loc;
 
+
   # get next slot to store element
   my ($idex,$bit)=$self->get_slot(
     \$elem->{path}
@@ -330,7 +331,6 @@ sub full_rehash($self) {
 
     my $elem=$main->read_elem();
 
-
     # insert all elements!
     $self->rehash($elem);
     $main->seek_next_elem($elem);
@@ -379,7 +379,6 @@ sub get_free($self,$x,$pathref=undef) {
   # then check that it matches
   #
   # on match, simply return these coords!
-
   if(defined $pathref && ($smask & $bit)) {
 
     my $have  = bitscanf $bit;
@@ -454,6 +453,7 @@ sub get_occu($self,$path) {
   # get key for path
   my $x=$self->hash($$pathref);
 
+
   # ^check for collision
   my ($idex,$bit) = $self->get_coord($x);
 
@@ -462,56 +462,58 @@ sub get_occu($self,$path) {
 
 
   # have correct slot?
+  my $bmask = $mask->[$idex];
+
   retry:
 
-  my $bmask = \$mask->[$idex];
   my $have  = bitscanf $bit;
-
   my $coord = $have+($idex*64);
 
-  if($$bmask & $bit) {
+  if($bmask & $bit) {
 
+    # stop if found
     my $elem=$self->hit($pathref,$coord);
 
-
-    # slot doesn't match data?
-    if(! length $elem) {
-
-
-      # try relloc on current mask?
-      if($round < 64) {
-
-        $bit=($bit < (1 << 63))
-          ? $bit << 1
-          : 1
-          ;
-
-        $round++;
-
-
-      # ^relloc to next mask!
-      } else {
-
-        $round=0;
-
-        $idex++;
-        $idex=0 if $idex >= int @$mask;
-
-        # ^fail if array is full!
-        return null if $idex == $start;
-
-      };
-
-
-      goto retry;
-
-
-    # ^fetched, stop
-    } else {
+    if(length $elem) {
       $elem->{hash_coord}=[$idex,$bit];
       return $elem;
 
     };
+
+
+    # try relloc on current mask?
+    $bmask &= ~$bit;
+
+    top:
+    $have=bitscanf $bmask;
+
+
+    # ^to the left on fail!
+    $have=bitscanr $bmask
+    if ! defined $have;
+
+    $bit=1 << ($have-1)
+    if defined $have;
+
+
+    # neither side is free?
+    if(! defined $have
+    || ! ($bit & $bmask)) {
+
+      $idex++;
+      $idex=0 if $idex >= int @$mask;
+
+      $bmask=$mask->[$idex];
+
+
+      # ^fail if array is full!
+      return null if $idex == $start;
+      goto   top;
+
+    };
+
+
+    goto retry;
 
   };
 
@@ -742,8 +744,8 @@ sub hit($self,$pathref,$coord) {
 
   # ^validate
   $main->err(
-    "bad hash '%s'",
-    args=>[$$pathref],
+    "bad key '%s' for file '%s'",
+    args=>[$$pathref,$main->{path}],
 
   ) if ! defined $elem;
 

@@ -11,7 +11,7 @@ The tradeoff for this reduced memory usage is most operations are I/O bound; whe
 
 ## SETUP
 
-Get [https://github.com/Liebranca/avtomat?tab=readme-ov-file#installation](`avtomat`). Then:
+Get [`avtomat`](https://github.com/Liebranca/avtomat?tab=readme-ov-file#installation). Then:
 
 ```bash
 cd  $ARPATH
@@ -54,56 +54,58 @@ $file->fclose();
 
 ### daf::new($class,$path,%O)
 
-Make a new archive.
+- Make a new archive.
 
-Takes a filepath and a hash holding options `%O`, which recognizes the following arguments:
+- Takes a filepath and a hash holding options `%O`, which recognizes the following arguments:
 
-- `blk_sz` size of each block in the file, expressed as an exponent. The final block size is then equal to `1 << blk_sz+4`.
+  - `blk_sz` size of each block in the file, expressed as an exponent. The final block size is then equal to `1 << blk_sz+4`.
 
-- `open` 1 if opening an existing file, 0 if making a new one.
+  - `open` 1 if opening an existing file, 0 if making a new one.
 
-The interface method `fnew` makes a new archive, while `fopen` reads an existing one.
+- The interface method `fnew` makes a new archive, while `fopen` reads an existing one.
 
 
 ### daf::fclose($self)
 
-Saves any edits on an open file, then closes it. This method is not called automatically on destruction.
+- Saves any edits on an open file, then closes it.
+
+- This method is not called automatically on destruction.
 
 
 ### daf::fetch($self,$path)
 
-Retrieve the element identified by `$path`, reading only metadata into memory.
+- Retrieve the element identified by `$path`, reading only metadata into memory.
 
-`$path` may be a string or string reference.
+- `$path` may be a string or string reference.
 
-The returned descriptor can be used by other methods to refer back to this block within the file, wherever a `$path` would be used instead.
+- The returned descriptor can be used by other methods to refer back to this block within the file, wherever a `$path` would be used instead.
 
 
 ### daf::store($self,$path,$type,$data)
 
-Write `$data`, as formatted by `$type`, to the entry identified by `$path`.
+- Write `$data`, as formatted by `$type`, to the entry identified by `$path`.
 
-Takes a filepath, a typename or type, and an array reference holding the content to pack according to the type's layout.
+- Takes a filepath, a typename or type, and an array reference holding the content to pack according to the type's layout.
 
-This method is used both for editing existing elements as well as making new entries.
+- This method is used both for editing existing elements as well as making new entries.
 
-`$path` may be either a string, string reference, or element descriptor, as returned by `fetch`.
+- `$path` may be either a string, string reference, or element descriptor, as returned by `fetch`.
 
 
 ### daf::load($self,$path)
 
-Retrieve the element identified by `$path`, copy it's contents into a string, and return this raw bytearray.
+- Retrieve the element identified by `$path`, copy it's contents into a string, and return this raw bytearray.
 
-`$path` may be either a string, string reference, or element descriptor, as returned by `fetch`.
+- `$path` may be either a string, string reference, or element descriptor, as returned by `fetch`.
 
 
 ### daf::free($self,$path)
 
-Zero-flood the contents of the entry identified by `$path` and mark it as available for reuse.
+- Zero-flood the contents of the entry identified by `$path` and mark it as available for reuse.
 
-Any blocks freed by this method that are not reused by a subsequent `store` will be effectively removed from the file during `fclose`.
+- Any blocks freed by this method that are not reused by a subsequent `store` will be effectively removed from the file during `fclose`.
 
-`$path` may be either a string, string reference, or element descriptor, as returned by `fetch`.
+- `$path` may be either a string, string reference, or element descriptor, as returned by `fetch`.
 
 
 ## FILE STRUCTURE
