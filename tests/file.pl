@@ -64,16 +64,17 @@ sub test_fopen($fname) {
   $daf->store(x4=>word=>[(0x4040) x 8]);
 
 
-  my $have=$daf->fetch(\'x1');
+  my $have=$daf->fetch('x1');
 
   fatdump \$have;
   fatdump \$daf->{update};
 
 
-  $have=$daf->read_data('x1');
+  $daf->store($have,word=>[(0x2121) x 8]);
+  my $bytes=$daf->load($have);
 
-  xd  $have,head=>0;
-  say length $have;
+  xd  $bytes,head=>0;
+  say length $bytes;
 
 
   $daf->fclose();

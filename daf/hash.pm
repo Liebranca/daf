@@ -440,11 +440,15 @@ sub get_free($self,$x,$pathref=undef) {
 # ---   *   ---   *   ---
 # ^read loc stored at path
 
-sub get_occu($self,$pathref) {
+sub get_occu($self,$path) {
 
 
   # get ctx
   my $mask=$self->{fetch_mask};
+  my $main=$self->{main};
+
+  # force string ref
+  my $pathref=$main->path_solve($path);
 
 
   # get key for path
@@ -521,6 +525,7 @@ sub get_occu($self,$pathref) {
 # matching path and size
 
 sub alloc($self,$pathref,$ezy) {
+
 
   # get ctx
   my $main=$self->{main};

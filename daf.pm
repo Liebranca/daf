@@ -379,7 +379,7 @@ sub read_elem($self) {
 # given an element descriptor,
 # read it's contents into a string
 
-sub read_data($self,$elem) {
+sub load($self,$elem) {
 
 
   # input is path?
@@ -465,9 +465,29 @@ sub seek_next_elem($self,$from) {
 };
 
 # ---   *   ---   *   ---
+# force string ref
+
+sub path_solve($self,$x) {
+
+  my $pathref=(! length ref $x)
+    ? \$x : $x ;
+
+  $pathref=\$x->{path}
+  if is_hashref $x;
+
+
+  return $pathref;
+
+};
+
+# ---   *   ---   *   ---
 # look for path in table
 
-sub fetch($self,$pathref) {
+sub fetch($self,$path) {
+
+
+  # force string ref
+  my $pathref=$self->path_solve($path);
 
 
   # elem in table?
@@ -709,18 +729,22 @@ sub cut($self,$ptr,$size) {
 sub store($self,$path,$type,$data) {
 
 
+  # force string ref
+  my $pathref=$self->path_solve($path);
+
+
   # pack data and find where to put it ;>
   my $tab  = $self->{tab};
 
-  my $have = $self->pack_data($type,$data,\$path);
-  my $lkup = $tab->alloc(\$path,$have->{ezy}-1);
+  my $have = $self->pack_data($type,$data,$pathref);
+  my $lkup = $tab->alloc($pathref,$have->{ezy}-1);
 
 
   # making new entry?
   if(! length $lkup) {
 
     $lkup=$self->new_elem($have);
-    $lkup->{path}=$path;
+    $lkup->{path}=$$pathref;
 
     if($tab->{size} < $self->{cnt}) {
       $self->defrag();
@@ -752,7 +776,7 @@ sub free($self,$path) {
 
   # skip if not found
   my $lkup=(! is_hashref $path)
-    ? $self->fetch(\$path)
+    ? $self->fetch($path)
     : $path
     ;
 
