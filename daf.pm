@@ -23,6 +23,7 @@ package daf;
   use English qw(-no_match_vars);
 
   use lib "$ENV{ARPATH}/lib/sys/";
+  use lib "$ENV{ARPATH}/lib/";
 
   use Style;
   use Chk;
@@ -40,12 +41,11 @@ package daf;
   use Arstd::xd;
 
   use parent 'St';
-  use lib "$ENV{ARPATH}/daf/";
 
 # ---   *   ---   *   ---
 # info
 
-  our $VERSION = v0.01.0;#b
+  our $VERSION = v0.01.1;#b
   our $AUTHOR  = 'IBN-3DILA';
 
 # ---   *   ---   *   ---
@@ -145,7 +145,10 @@ sub new($class,$path,%O) {
 
     blk_sz => $O{blk_sz},
 
-    update => {rehash=>0,defrag=>0,header=>0},
+    update => {map {
+      $ARG=>0
+
+    } qw(defrag rehash tab header)},
 
   },$class;
 
@@ -271,6 +274,10 @@ sub fclose($self) {
   # rebuild hash table?
   if($pending->{rehash}) {
     $self->{tab}->full_rehash();
+    $self->{tab}->save();
+
+  # rewrite *just* the tab header?
+  } elsif($pending->{tab}) {
     $self->{tab}->save();
 
   };
@@ -715,7 +722,15 @@ sub store($self,$path,$type,$data) {
     $lkup=$self->new_elem($have);
     $lkup->{path}=$path;
 
-    $tab->rehash($lkup);
+    if($tab->{size} < $self->{cnt}) {
+      $self->defrag();
+      $tab->full_rehash();
+
+    } else {
+      $tab->rehash($lkup);
+      $self->{update}->{tab} |= 1;
+
+    };
 
 
   # overwrite existing!
@@ -900,64 +915,6 @@ sub err($self,$me,%O) {
   return;
 
 };
-
-# ---   *   ---   *   ---
-# test A
-
-use Arstd::xd;
-use Fmat;
-
-sub test_fnew($class,$fname) {
-
-  my $daf  = $class->fnew($fname);
-  my @fake = qw(x0 x1 x2);
-
-  map {
-
-    $daf->store(
-      "$fake[$ARG]",
-      'word',[(0x2420|$ARG) x 8]
-
-    )
-
-  } 0..$#fake;
-
-  $daf->fclose();
-  return;
-
-};
-
-# ---   *   ---   *   ---
-# test B
-
-sub test_fopen($class,$fname) {
-
-  my $daf=$class->fopen($fname);
-
-  $daf->store(x1=>word=>[(0x2424) x 16]);
-
-  my $have=$daf->fetch(\'x1');
-  fatdump \$have;
-  fatdump \$daf->{update};
-
-  $have=$daf->read_data('x1');
-  xd $have,head=>0;
-  say length $have;
-
-  $daf->fclose();
-  return;
-
-};
-
-# ---   *   ---   *   ---
-# the bit
-
-#my $pkg   = St::cpkg;
-#my $fname = './testy';
-#
-#$pkg->test_fnew($fname);
-#$pkg->test_fopen($fname);
-
 
 # ---   *   ---   *   ---
 1; # ret

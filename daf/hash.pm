@@ -36,7 +36,7 @@ package daf::hash;
 # ---   *   ---   *   ---
 # info
 
-  our $VERSION = v0.00.3;#a
+  our $VERSION = v0.00.4;#a
   our $AUTHOR  = 'IBN-3DILA';
 
 # ---   *   ---   *   ---
@@ -724,7 +724,9 @@ sub hit($self,$pathref,$coord) {
 
   # get location of element
   my $loc=$self->{fetch}->[$coord];
-     $loc=($loc+1) * $blk_sz;
+  return null if ! defined $loc;
+
+  $loc=($loc+1) * $blk_sz;
 
 
   # jump to location and read elem
