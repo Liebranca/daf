@@ -45,7 +45,7 @@ package daf;
 # ---   *   ---   *   ---
 # info
 
-  our $VERSION = v0.01.2;#b
+  our $VERSION = v0.01.3;#b
   our $AUTHOR  = 'IBN-3DILA';
 
 # ---   *   ---   *   ---
@@ -600,6 +600,7 @@ sub pack_data($self,$type,$data,$pathref) {
 
 sub new_elem($self,$data) {
 
+
   # jump to breakpoint
   $self->{tab}->seek_elem(0);
 
@@ -757,12 +758,10 @@ sub store($self,$path,$type,$data=undef) {
 
 
     if($tab->{size} < $self->{cnt}) {
-      $self->defrag();
       $tab->full_rehash();
 
     } else {
       $tab->rehash($lkup);
-      $self->{update}->{tab} |= 1;
 
     };
 
@@ -847,7 +846,6 @@ sub free($self,$path) {
 
 
   $self->{update}->{defrag} |= 1;
-  $self->{update}->{rehash} |= 1;
 
 
   return 1;
@@ -867,6 +865,7 @@ sub defrag($self) {
 
   my $cnt     = $self->{cnt};
   my $i       = 0;
+  my $diff    = 0;
 
 
   # open tmp file
@@ -900,6 +899,10 @@ sub defrag($self) {
       $self->{cnt}++;
       $self->{blkcnt} += $elem->{ezy}+1;
 
+    # ^count removed!
+    } else {
+      $diff++;
+
     };
 
     $self->seek_next_elem($elem);
@@ -925,7 +928,7 @@ sub defrag($self) {
   $self->{fh}=$dst;
 
   $self->{update}->{defrag} &= 0;
-  $self->{update}->{rehash} |= 1;
+  $self->{update}->{rehash} |= int $diff > 0;
 
   return;
 

@@ -36,7 +36,7 @@ package daf::hash;
 # ---   *   ---   *   ---
 # info
 
-  our $VERSION = v0.00.4;#a
+  our $VERSION = v0.00.5;#b
   our $AUTHOR  = 'IBN-3DILA';
 
 # ---   *   ---   *   ---
@@ -276,8 +276,6 @@ sub rehash($self,$elem) {
   my $loc = $elem->{base}-$skip;
      $loc = int_urdiv $loc,$main->{blk_sz};
 
-  $loc-- if $loc;
-
 
   # get next slot to store element
   my ($idex,$bit)=$self->get_slot(
@@ -290,12 +288,12 @@ sub rehash($self,$elem) {
     "unhashable '%s'",
     args=>[$elem->{path}],
 
-  ) if ! defined $idex;
+  ) if ! length $idex;
 
 
   # overwrite cached value
   my $have  = bitscanf $bit;
-  my $coord = $have+($idex*64);
+  my $coord = ($have-1)+($idex*64);
 
   $self->{fetch}->[$coord]=$loc;
 
@@ -303,6 +301,8 @@ sub rehash($self,$elem) {
   # mark occupied
   $fmask->[$idex] |= $bit;
   $amask->[$idex] |= $bit;
+
+  $main->{update}->{tab} |= 1;
 
 
   return;
@@ -339,6 +339,7 @@ sub full_rehash($self) {
 
 
   $main->{update}->{rehash} &= 0;
+
   return;
 
 };
@@ -383,7 +384,7 @@ sub get_free($self,$x,$pathref=undef) {
 
     my $have  = bitscanf $bit;
 
-    my $coord = $have + ($idex * 64);
+    my $coord = ($have-1) + ($idex * 64);
     my $elem  = $self->hit($pathref,$coord);
 
     return ($idex,$bit)
@@ -419,12 +420,12 @@ sub get_free($self,$x,$pathref=undef) {
 
       # ^fail if array is full!
       goto retry if $idex != $start;
-      return undef;
+      return null;
 
 
     # found avail, stop
     } else {
-      $bit=1 << $have;
+      $bit=1 << ($have-1);
 
     };
 
@@ -467,7 +468,7 @@ sub get_occu($self,$path) {
   retry:
 
   my $have  = bitscanf $bit;
-  my $coord = $have+($idex*64);
+  my $coord = ($have-1)+($idex*64);
 
   if($bmask & $bit) {
 
@@ -511,7 +512,6 @@ sub get_occu($self,$path) {
       goto   top;
 
     };
-
 
     goto retry;
 
@@ -586,7 +586,7 @@ sub free($self,$elem) {
 
   my $have  = bitscanf $bit;
 
-  my $coord = $have + ($idex * 64);
+  my $coord = ($have-1) + ($idex * 64);
   my $ezy   = $elem->{ezy};
 
 
@@ -651,6 +651,7 @@ sub load($self) {
     $self->{mask_size};
 
   $self->{fetch_mask}=$have->{ct};
+  $self->{avail_mask}=$have->{ct};
 
 
   # read N entries
@@ -677,6 +678,7 @@ sub load($self) {
 # the archive!
 
 sub save($self) {
+
 
   # get ctx
   my $main  = $self->{main};
@@ -733,7 +735,7 @@ sub hit($self,$pathref,$coord) {
   my $loc=$self->{fetch}->[$coord];
   return null if ! defined $loc;
 
-  $loc=($loc+1) * $blk_sz;
+  $loc=$loc * $blk_sz;
 
 
   # jump to location and read elem
